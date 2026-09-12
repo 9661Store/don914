@@ -59,7 +59,6 @@ mode = st.sidebar.radio("切換系統模組", [
 ])
 st.sidebar.markdown("---")
 
-# --- 📚 找回失去的技術說明書 ---
 with st.sidebar.expander("📚 選股策略與技術指標說明", expanded=False):
     st.markdown("""
     **1. 投本比 (投信買超佔股本比例)**
@@ -86,8 +85,8 @@ st.sidebar.markdown("---")
 if mode in ["📡 實戰雷達 (今日選股)", "🎯 個股健檢 (標的審查)"]:
     st.sidebar.subheader("🎛️ 嚴格選股濾網設定")
     
-    # 🎯 投本比靈魂濾網霸氣回歸！(置頂顯示)
-    use_it_ratio = st.sidebar.checkbox("✅ 啟用【投本比】(雷達掃描專用)", True, help="大於 0.4% 通常代表投信積極建倉！")
+    # 🎯 投本比解開封印，健檢與雷達通用！
+    use_it_ratio = st.sidebar.checkbox("✅ 啟用【投本比】", True, help="大於 0.4% 通常代表投信積極建倉！")
     if use_it_ratio: ui_min_it_ratio = st.sidebar.slider("投本比下限 (%)", 0.1, 2.0, 0.4, 0.1)
     
     st.sidebar.markdown("---")
@@ -204,7 +203,6 @@ if mode == "📡 實戰雷達 (今日選股)":
                             pass_bias, pass_kd, pass_rsi, pass_it = True, True, True, True
                             data_dict = {'代碼': stock['code'], '名稱': stock['name'], '收盤價': round(close, 2)}
                             
-                            # 🎯 TWSE 雲端投本比運算回歸！
                             real_it_ratio = round(((stock['it_buy'] * 2.5) / shares) * 100, 2)
                             data_dict['投本比(%)'] = real_it_ratio
                             if use_it_ratio and real_it_ratio < ui_min_it_ratio: pass_it = False
@@ -244,14 +242,18 @@ if mode == "📡 實戰雷達 (今日選股)":
 # 模組 2：個股健檢 (標的審查)
 # ==========================================
 elif mode == "🎯 個股健檢 (標的審查)":
-    st.subheader("🎯 個股 X 光機 - 嚴格審查")
+    st.subheader("🎯 個股 X 光機 - 籌碼與技術面雙重審查")
     st.markdown("輸入任何一檔股票，系統將比對左側的濾網標準，立刻為您診斷是否達到進場條件。")
     check_stock = st.selectbox("請選擇要健檢的標的", options=list(STOCK_DICT.keys()))
     
     if st.button("🩺 開始健檢", type="primary"):
         yahoo_ticker = STOCK_DICT[check_stock]
-        with st.spinner(f"正在為 {check_stock} 進行全身技術面檢查..."):
+        stock_code = check_stock.split(" ")[0]
+        market = ".TW" if "(上市)" in check_stock else ".TWO"
+        
+        with st.spinner(f"正在為 {check_stock} 進行全身籌碼與技術面檢查..."):
             try:
+                # 1. 技術面抓取
                 ticker = yf.Ticker(yahoo_ticker, session=session)
                 hist = ticker.history(period="3mo")
                 if hist.empty: st.error("⚠️ 無法取得歷史資料。")
@@ -272,18 +274,55 @@ elif mode == "🎯 個股健檢 (標的審查)":
                     rs = gain / loss
                     rsi_val = round((100 - (100 / (1 + rs))).iloc[-1], 2)
                     
+                    # 2. 籌碼面抓取 (投本比)
+                    it_buy = 0
+                    real_it_ratio = 0.0
+                    if use_it_ratio:
+                        today = datetime.datetime.now()
+                        last_date = today - datetime.timedelta(days=1) if today.weekday() < 5 else today - datetime.timedelta(days=today.weekday()-4)
+                        twse_date = last_date.strftime('%Y%m%d')
+                        tpex_date = f"{last_date.year - 1911}/{last_date.strftime('%m/%d')}"
+                        
+                        try:
+                            if market == ".TW":
+                                twse_data = requests.get(f"https://www.twse.com.tw/fund/T86?response=json&date={twse_date}&selectType=ALL", verify=False, timeout=5).json()
+                                for row in twse_data.get('data', []):
+                                    if row[0].strip() == stock_code:
+                                        it_buy = int(row[10].replace(',', ''))
+                                        break
+                            else:
+                                tpex_data = requests.get(f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=EW&t=D&d={tpex_date}", verify=False, timeout=5).json()
+                                for row in tpex_data.get('aaData', []):
+                                    if str(row[0]).strip() == stock_code:
+                                        it_buy = int(str(row[7]).replace(',', '').split('.')[0])
+                                        break
+                        except: pass
+                        
+                        shares = ticker.info.get('sharesOutstanding', 0)
+                        if shares and shares > 0 and it_buy > 0:
+                            real_it_ratio = round(((it_buy * 2.5) / shares) * 100, 2)
+                    
                     st.markdown(f"### 📊 【{check_stock}】 目前現價: {close} 元")
                     
                     pass_all = True
-                    col1, col2, col3 = st.columns(3)
+                    # 🎯 擴充為 4 個欄位，加入投本比！
+                    col1, col2, col3, col4 = st.columns(4)
+                    
                     with col1:
+                        if use_it_ratio:
+                            status = "✅ 通過" if real_it_ratio >= ui_min_it_ratio else "❌ 未達標"
+                            if status == "❌ 未達標": pass_all = False
+                            st.metric("投本比 (前一交易日)", f"{real_it_ratio}%", status)
+                        else: st.metric("投本比", "-", "未啟用濾網")
+                        
+                    with col2:
                         if use_bias:
                             status = "✅ 通過" if ui_bias_range[0] <= bias <= ui_bias_range[1] else "❌ 失敗"
                             if status == "❌ 失敗": pass_all = False
                             st.metric("BIAS(20日)", f"{bias}%", status)
                         else: st.metric("BIAS(20日)", f"{bias}%", "未啟用濾網")
                             
-                    with col2:
+                    with col3:
                         if use_kd:
                             status = "✅ 通過"
                             if not (ui_k_range[0] <= k_val <= ui_k_range[1]): status = "❌ 數值不在區間"
@@ -292,7 +331,7 @@ elif mode == "🎯 個股健檢 (標的審查)":
                             st.metric("KD 狀態", f"K:{k_val} D:{d_val}", status)
                         else: st.metric("KD 狀態", f"K:{k_val} D:{d_val}", "未啟用濾網")
                             
-                    with col3:
+                    with col4:
                         if use_rsi:
                             status = "✅ 通過" if rsi_val >= ui_rsi_min else "❌ 失敗"
                             if status == "❌ 失敗": pass_all = False
@@ -300,8 +339,8 @@ elif mode == "🎯 個股健檢 (標的審查)":
                         else: st.metric("RSI(12日)", f"{rsi_val}", "未啟用濾網")
                             
                     st.markdown("---")
-                    if pass_all: st.success("🎉 **診斷結果：完美！** 該檔股票完全符合您左側設定的所有技術面標準！")
-                    else: st.error("⚠️ **診斷結果：未達標。** 目前尚未完全符合進場紀律，建議耐心等候訊號出現。")
+                    if pass_all: st.success("🎉 **診斷結果：完美！** 該檔股票完全符合您左側設定的【籌碼面】與【技術面】所有標準！")
+                    else: st.error("⚠️ **診斷結果：未達標。** 目前尚未完全符合進場紀律 (特別注意亮紅燈的項目)，建議耐心等候。")
             except Exception as e: st.error(f"健檢過程發生錯誤: {e}")
 
 # ==========================================
