@@ -121,7 +121,6 @@ if mode == "📡 嚴選加權評分雷達":
                         
                         survivors = []
                         for _, row in df_res.iterrows():
-                            # 嚴格過濾
                             if not col_it or not col_cap: continue
                             try:
                                 it_val = float(str(row[col_it]).replace(',', ''))
@@ -133,7 +132,6 @@ if mode == "📡 嚴選加權評分雷達":
                             if it_ratio < ui_min_it_ratio: continue
                             if not (-ui_bias_max <= bias <= ui_bias_max): continue
                             
-                            # 存活者計分
                             score = 55
                             k, d = row.get('K值', 50), row.get('D值', 50)
                             if k > d and k <= 80: score += 25
@@ -211,7 +209,6 @@ if mode == "📡 嚴選加權評分雷達":
                             if not shares or shares <= 0: continue
                             if round(shares / 10000000, 2) > ui_max_cap or vol5 < ui_min_vol: continue
 
-                            # ⛔ 嚴格過濾
                             it_ratio = round(((stock['it_buy'] * 2.5) / shares) * 100, 2)
                             if it_ratio < ui_min_it_ratio: continue
                             
@@ -219,7 +216,6 @@ if mode == "📡 嚴選加權評分雷達":
                             bias = round(((close - ma20) / ma20) * 100, 2)
                             if not (-ui_bias_max <= bias <= ui_bias_max): continue
                             
-                            # 🏆 存活者計分
                             score = 55
                             
                             low9, high9 = hist['Low'].rolling(9).min(), hist['High'].rolling(9).max()
@@ -428,7 +424,8 @@ elif mode == "💼 投資追蹤 (進出場管理)":
             with col1:
                 t_stock = st.selectbox("選擇買進標的", options=list(STOCK_DICT.keys()))
                 t_date = st.date_input("買進日期", datetime.date.today())
-                t_price = st.number_input("買進均價", min_value=0.0, step=1.0)
+                # 🛑 防呆機制：預設值改為 50，且最低為 0.01 避免除以零錯誤
+                t_price = st.number_input("買進均價", min_value=0.01, value=50.0, step=1.0)
             with col2:
                 t_shares = st.number_input("買進股數", min_value=1, value=1000, step=1000)
                 t_sl = st.number_input("設定停損價位", min_value=0.0, step=1.0)
@@ -447,18 +444,28 @@ elif mode == "💼 投資追蹤 (進出場管理)":
         
         with st.spinner("🔄 正在連線交易所取得最新報價..."):
             live_prices = []
-            for sym in df_p['股票']:
+            for idx, row in df_p.iterrows():
                 try:
-                    yahoo_ticker = STOCK_DICT.get(sym, "2330.TW")
+                    yahoo_ticker = STOCK_DICT.get(row['股票'], "2330.TW")
                     ticker = yf.Ticker(yahoo_ticker, session=session)
-                    live_p = ticker.history(period="1d")['Close'].iloc[-1]
-                    live_prices.append(round(live_p, 2))
+                    
+                    # 🛡️ 裝甲防禦：拉長到抓取 5 天，只要有一天有報價就能抓到最後收盤價！
+                    hist = ticker.history(period="5d")
+                    if not hist.empty:
+                        live_prices.append(round(hist['Close'].iloc[-1], 2))
+                    else:
+                        live_prices.append(row['買進價']) # 如果還是抓不到，用買進價代替避免算成 -100%
                 except:
-                    live_prices.append(0)
+                    live_prices.append(row['買進價'])
             
             df_p['最新現價'] = live_prices
             df_p['未實現損益(元)'] = ((df_p['最新現價'] - df_p['買進價']) * df_p['股數']).astype(int)
-            df_p['報酬率(%)'] = (((df_p['最新現價'] - df_p['買進價']) / df_p['買進價']) * 100).round(2)
+            
+            # 🛡️ 裝甲防禦：安全計算報酬率，如果買進價大於 0 才計算，否則為 0
+            df_p['報酬率(%)'] = df_p.apply(
+                lambda x: round(((x['最新現價'] - x['買進價']) / x['買進價']) * 100, 2) if x['買進價'] > 0 else 0, 
+                axis=1
+            )
             
             status_list = []
             for _, row in df_p.iterrows():
