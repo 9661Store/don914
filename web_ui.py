@@ -17,7 +17,7 @@ session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)
 
 # --- 網頁介面設定 ---
 st.set_page_config(page_title="小資投本比 旗艦終端機", page_icon="🚀", layout="wide")
-st.title("🏆 小資投本比 - 彈性加權評分終端機")
+st.title("🏆 小資投本比 - 智慧加權評分終端機")
 
 # --- 建立暫存記憶體 ---
 if 'radar_data' not in st.session_state: st.session_state['radar_data'] = None
@@ -49,7 +49,7 @@ def load_taiwan_stocks():
 
 STOCK_DICT = load_taiwan_stocks()
 
-# --- 側邊欄：系統模式與自訂參數切換 ---
+# --- 側邊欄：系統模式與篩選設定 ---
 mode = st.sidebar.radio("切換系統模組", [
     "📡 智慧加權評分雷達", 
     "🎯 個股健檢 (標的審查)", 
@@ -58,17 +58,26 @@ mode = st.sidebar.radio("切換系統模組", [
 ])
 st.sidebar.markdown("---")
 
-st.sidebar.subheader("🎛️ 自訂加權計分與門檻設定")
+st.sidebar.subheader("🎛️ 加權計分與防禦過濾網")
 ui_min_it_ratio = st.sidebar.slider("投本比達標門檻 (%)", 0.1, 2.0, 0.4, 0.1)
 ui_bias_max = st.sidebar.slider("乖離率安全區上限 (%)", 3.0, 15.0, 8.0, 0.5)
 
-with st.sidebar.expander("📚 加權計分策略說明", expanded=False):
+st.sidebar.markdown("---")
+st.sidebar.subheader("🛡️ 剔除雞蛋水餃與冷門股")
+ui_min_vol = st.sidebar.slider("5日均量下限 (張)", 100, 5000, 800, 100, help="過濾成交量太小的冷門股")
+ui_max_cap = st.sidebar.slider("股本上限 (億)", 10, 500, 200, 10, help="鎖定中小型潛力飆股")
+
+# 📚 完整補回選股邏輯與加權計分說明
+st.sidebar.markdown("---")
+with st.sidebar.expander("📚 選股策略與加權計分說明", expanded=True):
     st.markdown("""
-    **💡 動態加權計分邏輯 (滿分 100 分)**
-    - **投本比權重 (+30分)**：投信買超佔股本比例達到您設定的門檻。
+    **💡 多維度動態加權計分 (滿分 100 分)**
+    - **投本比權重 (+30分)**：投信重金買超佔股本比例達到您設定的門檻。
     - **乖離率權重 (+25分)**：20日乖離落在安全區內，避免追高。
     - **KD 交叉權重 (+25分)**：9日 K 值大於 D 值（黃金交叉動能）。
     - **RSI 強弱權重 (+20分)**：12日 RSI 大於 50（多方掌控）。
+    
+    *分數越高代表籌碼與技術面越契合，由高到低自動排序！*
     """)
 st.sidebar.markdown("---")
 
@@ -77,7 +86,7 @@ st.sidebar.markdown("---")
 # ==========================================
 if mode == "📡 智慧加權評分雷達":
     st.subheader("📡 全市場飆股 - 多維度加權評分排序")
-    st.markdown("系統將依據您在左側自訂的標準為每檔股票評分，分數越高排越前面！")
+    st.markdown("系統將依據您在左側自訂的標準與防禦濾網進行評分，自動剔除冷門與雞蛋水餃股！")
     
     data_source = st.radio("選擇數據引擎", ["⚡ XQ 檔案上傳 (極速)", "☁️ TWSE 雲端抓取 (智慧回溯)"], horizontal=True)
     uploaded_file = None
@@ -87,7 +96,6 @@ if mode == "📡 智慧加權評分雷達":
     else:
         col1, col2 = st.columns(2)
         with col1: chk_twse, chk_tpex = st.checkbox("上市", True), st.checkbox("上櫃", True)
-        with col2: ui_min_vol, ui_max_cap = st.slider("均量下限(張)", 100, 5000, 1000, 100), st.slider("股本上限(億)", 10, 500, 200, 10)
 
     if st.button("🚀 開始計算加權評分", type="primary"):
         if data_source == "⚡ XQ 檔案上傳 (極速)":
@@ -141,11 +149,10 @@ if mode == "📡 智慧加權評分雷達":
                     except Exception as e: st.error(f"⚠️ 解析錯誤：{e}")
             else: st.warning("⚠️ 請先上傳 CSV 檔案！")
         else:
-            with st.spinner("☁️ 正在連線雲端並智慧回溯最近交易日..."):
+            with st.spinner("☁️ 正在連線雲端並智慧回溯最近交易日與過濾水餃股..."):
                 stock_list = []
                 target_date = datetime.datetime.now()
                 
-                # 智慧回溯機制：若當天抓不到就往回找最多 3 天
                 for _ in range(3):
                     twse_date = target_date.strftime('%Y%m%d')
                     tpex_date = f"{target_date.year - 1911}/{target_date.strftime('%m/%d')}"
@@ -178,7 +185,7 @@ if mode == "📡 智慧加權評分雷達":
 
                 if not stock_list: st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 雲端暫無投信買超紀錄，請稍後再試或使用 XQ 上傳。"
                 else:
-                    my_bar = st.progress(0, text="雲端加權計分運算中...")
+                    my_bar = st.progress(0, text="過濾水餃股與加權計分運算中...")
                     results = []
                     for i, stock in enumerate(stock_list):
                         if i % max(1, (len(stock_list) // 10)) == 0: my_bar.progress((i + 1) / len(stock_list))
@@ -187,6 +194,10 @@ if mode == "📡 智慧加權評分雷達":
                             hist = ticker.history(start=(target_date - datetime.timedelta(days=60)).strftime('%Y-%m-%d'))
                             if len(hist) < 20: continue
                             close = float(hist['Close'].iloc[-1])
+                            
+                            # 🛡️ 嚴格防禦：過濾掉低價水餃股 (例如股價小於 10 元)
+                            if close < 10.0: continue
+                            
                             vol5 = float(hist['Volume'].rolling(5).mean().iloc[-1]) / 1000
                             shares = ticker.info.get('sharesOutstanding', 0)
                             if not shares or shares <= 0: continue
@@ -225,7 +236,7 @@ if mode == "📡 智慧加權評分雷達":
                     if results:
                         df_export = pd.DataFrame(results).sort_values('綜合加權得分', ascending=False)
                         st.session_state['radar_data'] = df_export
-                        st.session_state['radar_msg'] = f"🎉 雲端加權評分完成！共計算 {len(df_export)} 檔標的："
+                        st.session_state['radar_msg'] = f"🎉 雲端加權評分完成！已成功排除水餃股，共篩選出 {len(df_export)} 檔優質標的："
                     else: st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 無符合條件標的。"
 
     if st.session_state['radar_data'] is not None:
