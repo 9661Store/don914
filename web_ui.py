@@ -17,7 +17,7 @@ session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)
 
 # --- 網頁介面設定 ---
 st.set_page_config(page_title="小資投本比 旗艦終端機", page_icon="🚀", layout="wide")
-st.title("🏆 小資投本比 - 嚴格過濾與加權評分終端機")
+st.title("🏆 小資投本比 - 估值防禦與嚴格過濾終端機")
 
 # --- 建立暫存記憶體 ---
 if 'radar_data' not in st.session_state: st.session_state['radar_data'] = None
@@ -63,9 +63,11 @@ if mode in ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"]
     st.sidebar.subheader("🎛️ 嚴格核心過濾門檻")
     ui_min_it_ratio = st.sidebar.slider("投本比絕對下限 (%)", 0.1, 2.0, 0.4, 0.1, help="未達此標準直接剔除")
     ui_bias_max = st.sidebar.slider("乖離率容忍上限 (%)", 3.0, 15.0, 8.0, 0.5, help="超出此區間直接剔除")
-
+    
+    # 🌟 新增：本益比防禦拉桿
     st.sidebar.markdown("---")
-    st.sidebar.subheader("🛡️ 體質與流動性防禦")
+    st.sidebar.subheader("🛡️ 估值與體質防禦")
+    ui_max_pe = st.sidebar.slider("本益比上限 (倍)", 5.0, 60.0, 20.0, 1.0, help="防禦估值過高飆股 (若公司虧損無本益比將自動剔除)")
     ui_min_vol = st.sidebar.slider("5日均量下限 (張)", 100, 5000, 800, 100)
     ui_max_cap = st.sidebar.slider("股本上限 (億)", 10, 500, 200, 10)
 
@@ -74,6 +76,7 @@ if mode in ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"]
         st.markdown("""
         **⛔ 第一階段：嚴格過濾 (Survival)**
         - 投本比必須大於門檻，且乖離率必須在安全區內 (-上限 ~ +上限)。
+        - **本益比必須低於上限設定 (且不可為虧損)。**
         - 股價低於 10 元水餃股直接剔除。
         - 成功存活者，保底獲得 55 分 (籌碼 30 + 位階 25)。
         
@@ -99,7 +102,7 @@ if mode == "📡 嚴選加權評分雷達":
     uploaded_file = None
     
     if data_source == "⚡ XQ 檔案上傳 (極速)":
-        uploaded_file = st.file_uploader("📂 請上傳 XQ 匯出的 CSV 檔", type=['csv'])
+        uploaded_file = st.file_uploader("📂 請上傳 XQ 匯出的 CSV 檔 (若有'本益比'欄位將啟動防禦)", type=['csv'])
     else:
         col1, col2 = st.columns(2)
         with col1: chk_twse, chk_tpex = st.checkbox("上市", True), st.checkbox("上櫃", True)
@@ -112,25 +115,33 @@ if mode == "📡 嚴選加權評分雷達":
                         df = pd.read_csv(uploaded_file, encoding='cp950', skiprows=3)
                         df_res = df.copy()
                         
-                        for col in ['BIAS(20日)', 'K值', 'D值', 'RSI(12日)']:
+                        for col in ['BIAS(20日)', 'K值', 'D值', 'RSI(12日)', '本益比']:
                             if col in df_res.columns:
                                 df_res[col] = pd.to_numeric(df_res[col].astype(str).str.replace(',', ''), errors='coerce')
                                 
                         col_it = next((c for c in df.columns if '投信買' in c), None)
                         col_cap = next((c for c in df.columns if '股本' in c), None)
+                        col_pe = next((c for c in df.columns if '本益比' in c), None)
                         
                         survivors = []
                         for _, row in df_res.iterrows():
+                            # 1. 投本比過濾
                             if not col_it or not col_cap: continue
                             try:
                                 it_val = float(str(row[col_it]).replace(',', ''))
                                 cap_val = float(str(row[col_cap]).replace(',', ''))
                                 it_ratio = ((it_val * 2.5) / (cap_val * 10000000)) * 100
                             except: continue
-                            
-                            bias = row.get('BIAS(20日)', 0)
                             if it_ratio < ui_min_it_ratio: continue
+                            
+                            # 2. 乖離率過濾
+                            bias = row.get('BIAS(20日)', 0)
                             if not (-ui_bias_max <= bias <= ui_bias_max): continue
+                                
+                            # 3. 估值防禦 (本益比)
+                            if col_pe:
+                                pe_val = row.get(col_pe, 0)
+                                if pd.isna(pe_val) or pe_val <= 0 or pe_val > ui_max_pe: continue
                             
                             score = 55
                             k, d = row.get('K值', 50), row.get('D值', 50)
@@ -149,7 +160,7 @@ if mode == "📡 嚴選加權評分雷達":
                             df_final = pd.DataFrame(survivors)
                             df_final = df_final.rename(columns={'商品': '名稱', 'SMA(20日)': '20日月線價'})
                             df_final = df_final.sort_values('綜合得分', ascending=False)
-                            show_cols = ['代碼', '名稱', '綜合得分', '投本比(%)', 'BIAS(20日)', 'K值', 'D值', 'RSI(12日)', '20日月線價']
+                            show_cols = ['代碼', '名稱', '綜合得分', '投本比(%)', 'BIAS(20日)', '本益比', 'K值', 'D值', 'RSI(12日)', '20日月線價']
                             show_cols = [c for c in show_cols if c in df_final.columns]
                             st.session_state['radar_data'] = df_final[show_cols]
                             st.session_state['radar_msg'] = f"🎉 嚴選完成！過濾後共存活 {len(df_final)} 檔標的，已依得分排序："
@@ -193,22 +204,29 @@ if mode == "📡 嚴選加權評分雷達":
 
                 if not stock_list: st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 雲端暫無投信買超紀錄。"
                 else:
-                    my_bar = st.progress(0, text="執行嚴格防禦過濾網中...")
+                    my_bar = st.progress(0, text="執行嚴格防禦過濾網 (包含估值計算) 中...")
                     results = []
                     for i, stock in enumerate(stock_list):
                         if i % max(1, (len(stock_list) // 10)) == 0: my_bar.progress((i + 1) / len(stock_list))
                         try:
                             ticker = yf.Ticker(f"{stock['code']}{stock['market']}", session=session)
+                            
+                            # 🛡️ 估值防禦 (本益比審查)
+                            info = ticker.info
+                            pe_ratio = info.get('trailingPE') or info.get('forwardPE') or 0
+                            if pe_ratio <= 0 or pe_ratio > ui_max_pe: continue
+                            
                             hist = ticker.history(start=(target_date - datetime.timedelta(days=60)).strftime('%Y-%m-%d'))
                             if len(hist) < 20: continue
                             close = float(hist['Close'].iloc[-1])
                             if close < 10.0: continue
                             
                             vol5 = float(hist['Volume'].rolling(5).mean().iloc[-1]) / 1000
-                            shares = ticker.info.get('sharesOutstanding', 0)
+                            shares = info.get('sharesOutstanding', 0)
                             if not shares or shares <= 0: continue
                             if round(shares / 10000000, 2) > ui_max_cap or vol5 < ui_min_vol: continue
 
+                            # ⛔ 投本比與乖離率過濾
                             it_ratio = round(((stock['it_buy'] * 2.5) / shares) * 100, 2)
                             if it_ratio < ui_min_it_ratio: continue
                             
@@ -216,6 +234,7 @@ if mode == "📡 嚴選加權評分雷達":
                             bias = round(((close - ma20) / ma20) * 100, 2)
                             if not (-ui_bias_max <= bias <= ui_bias_max): continue
                             
+                            # 🏆 存活者計分
                             score = 55
                             
                             low9, high9 = hist['Low'].rolling(9).min(), hist['High'].rolling(9).max()
@@ -234,15 +253,16 @@ if mode == "📡 嚴選加權評分雷達":
 
                             results.append({
                                 '代碼': stock['code'], '名稱': stock['name'], '綜合得分': score,
-                                '投本比(%)': it_ratio, 'BIAS(20日)': bias, 'K值': k_val, 'D值': d_val, '收盤價': round(close, 2)
+                                '投本比(%)': it_ratio, '本益比': round(pe_ratio, 2), 'BIAS(20日)': bias, 
+                                'K值': k_val, 'D值': d_val, '收盤價': round(close, 2)
                             })
                         except: continue
                     my_bar.empty()
                     if results:
                         df_export = pd.DataFrame(results).sort_values('綜合得分', ascending=False)
                         st.session_state['radar_data'] = df_export
-                        st.session_state['radar_msg'] = f"🎉 嚴選完成！過濾後共存活 {len(df_export)} 檔優質標的："
-                    else: st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 條件過於嚴格，本次無標的存活。"
+                        st.session_state['radar_msg'] = f"🎉 嚴選完成！過濾掉高估值飆股後，共存活 {len(df_export)} 檔優質標的："
+                    else: st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 條件過於嚴格，本次無標的存活 (可能是本益比設定過低)。"
 
     if st.session_state['radar_data'] is not None:
         if not st.session_state['radar_data'].empty:
@@ -254,7 +274,7 @@ if mode == "📡 嚴選加權評分雷達":
 # 模組 2：個股健檢 (標的審查)
 # ==========================================
 elif mode == "🎯 個股健檢 (標的審查)":
-    st.subheader("🎯 個股 X 光機 - 籌碼與技術面雙重審查")
+    st.subheader("🎯 個股 X 光機 - 籌碼、估值與技術面三度審查")
     st.markdown("比對左側的濾網標準，立刻為您診斷是否達到嚴格進場條件。")
     check_stock = st.selectbox("請選擇要健檢的標的", options=list(STOCK_DICT.keys()))
     
@@ -267,11 +287,16 @@ elif mode == "🎯 個股健檢 (標的審查)":
             try:
                 ticker = yf.Ticker(yahoo_ticker, session=session)
                 hist = ticker.history(period="3mo")
+                info = ticker.info
+                
                 if hist.empty: st.error("⚠️ 無法取得歷史資料。")
                 else:
                     close = round(hist['Close'].iloc[-1], 2)
                     ma20 = hist['Close'].rolling(window=20).mean()
                     bias = round(((hist['Close'] - ma20) / ma20).iloc[-1] * 100, 2)
+                    
+                    # 抓取本益比
+                    pe_ratio = info.get('trailingPE') or info.get('forwardPE') or 0
                     
                     low9, high9 = hist['Low'].rolling(9).min(), hist['High'].rolling(9).max()
                     rsv = (hist['Close'] - low9) / (high9 - low9) * 100
@@ -308,31 +333,38 @@ elif mode == "🎯 個股健檢 (標的審查)":
                         if it_buy > 0: break
                         target_date -= datetime.timedelta(days=1)
                         
-                    shares = ticker.info.get('sharesOutstanding', 0)
+                    shares = info.get('sharesOutstanding', 0)
                     if shares and shares > 0 and it_buy > 0:
                         real_it_ratio = round(((it_buy * 2.5) / shares) * 100, 2)
                     
                     st.markdown(f"### 📊 【{check_stock}】 目前現價: {close} 元")
                     
                     pass_all = True
-                    col1, col2, col3, col4 = st.columns(4)
+                    # 擴展為 5 個指標欄位，新增本益比檢查！
+                    col1, col2, col3, col4, col5 = st.columns(5)
                     
                     with col1:
                         status = "✅ 存活" if real_it_ratio >= ui_min_it_ratio else "❌ 剔除"
                         if status == "❌ 剔除": pass_all = False
-                        st.metric(f"投本比 (門檻 {ui_min_it_ratio}%)", f"{real_it_ratio}%", status)
+                        st.metric(f"投本比 (>{ui_min_it_ratio}%)", f"{real_it_ratio}%", status)
                         
                     with col2:
                         status = "✅ 存活" if -ui_bias_max <= bias <= ui_bias_max else "❌ 剔除"
                         if status == "❌ 剔除": pass_all = False
-                        st.metric(f"BIAS (容忍 ±{ui_bias_max}%)", f"{bias}%", status)
-                            
+                        st.metric(f"BIAS (±{ui_bias_max}%)", f"{bias}%", status)
+                        
                     with col3:
-                        status = "🔥 動能加分" if k_val > d_val else "➖ 未加分"
-                        st.metric("KD 狀態", f"K:{k_val} D:{d_val}", status)
+                        pe_display = f"{round(pe_ratio, 2)} 倍" if pe_ratio > 0 else "無/虧損"
+                        status = "✅ 存活" if 0 < pe_ratio <= ui_max_pe else "❌ 剔除"
+                        if status == "❌ 剔除": pass_all = False
+                        st.metric(f"本益比 (<{ui_max_pe})", pe_display, status)
                             
                     with col4:
-                        status = "🔥 趨勢加分" if rsi_val >= 50 else "➖ 未加分"
+                        status = "🔥 加分" if k_val > d_val else "➖ 未加分"
+                        st.metric("KD 狀態", f"K:{k_val}", status)
+                            
+                    with col5:
+                        status = "🔥 加分" if rsi_val >= 50 else "➖ 未加分"
                         st.metric("RSI(12日)", f"{rsi_val}", status)
                             
                     st.markdown("---")
@@ -341,8 +373,8 @@ elif mode == "🎯 個股健檢 (標的審查)":
                         if k_val > d_val and k_val <= 80: score += 25
                         elif k_val > d_val: score += 15
                         if rsi_val >= 50: score += 20
-                        st.success(f"🎉 **診斷結果：存活！** 該檔股票通過嚴格過濾，綜合得分為 **{score} 分**！")
-                    else: st.error("⚠️ **診斷結果：淘汰。** 核心籌碼或位階未達嚴格標準，建議剔除。")
+                        st.success(f"🎉 **診斷結果：存活！** 該檔股票通過籌碼、位階與估值的嚴格過濾，綜合得分為 **{score} 分**！")
+                    else: st.error("⚠️ **診斷結果：淘汰。** 核心籌碼、位階或估值未達嚴格標準 (請特別注意亮紅燈的項目)，建議剔除。")
             except Exception as e: st.error(f"健檢過程發生錯誤: {e}")
 
 # ==========================================
@@ -424,7 +456,6 @@ elif mode == "💼 投資追蹤 (進出場管理)":
             with col1:
                 t_stock = st.selectbox("選擇買進標的", options=list(STOCK_DICT.keys()))
                 t_date = st.date_input("買進日期", datetime.date.today())
-                # 🛑 防呆機制：預設值改為 50，且最低為 0.01 避免除以零錯誤
                 t_price = st.number_input("買進均價", min_value=0.01, value=50.0, step=1.0)
             with col2:
                 t_shares = st.number_input("買進股數", min_value=1, value=1000, step=1000)
@@ -449,19 +480,17 @@ elif mode == "💼 投資追蹤 (進出場管理)":
                     yahoo_ticker = STOCK_DICT.get(row['股票'], "2330.TW")
                     ticker = yf.Ticker(yahoo_ticker, session=session)
                     
-                    # 🛡️ 裝甲防禦：拉長到抓取 5 天，只要有一天有報價就能抓到最後收盤價！
                     hist = ticker.history(period="5d")
                     if not hist.empty:
                         live_prices.append(round(hist['Close'].iloc[-1], 2))
                     else:
-                        live_prices.append(row['買進價']) # 如果還是抓不到，用買進價代替避免算成 -100%
+                        live_prices.append(row['買進價'])
                 except:
                     live_prices.append(row['買進價'])
             
             df_p['最新現價'] = live_prices
             df_p['未實現損益(元)'] = ((df_p['最新現價'] - df_p['買進價']) * df_p['股數']).astype(int)
             
-            # 🛡️ 裝甲防禦：安全計算報酬率，如果買進價大於 0 才計算，否則為 0
             df_p['報酬率(%)'] = df_p.apply(
                 lambda x: round(((x['最新現價'] - x['買進價']) / x['買進價']) * 100, 2) if x['買進價'] > 0 else 0, 
                 axis=1
