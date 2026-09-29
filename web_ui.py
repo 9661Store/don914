@@ -6,6 +6,7 @@ import requests
 import warnings
 import ssl
 import urllib3
+import os
 
 # --- 破解 SSL 防火牆與限流設定 ---
 warnings.filterwarnings('ignore')
@@ -17,17 +18,50 @@ session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)
 
 # --- 網頁介面設定 ---
 st.set_page_config(page_title="小資投本比 旗艦終端機", page_icon="🚀", layout="wide")
+
+# ==========================================
+# 🛡️ 系統授權登入閘門
+# ==========================================
+# 👈 已為您設定專屬授權 E-mail
+AUTHORIZED_EMAILS = ["w184813740@hotmail.com"] 
+
+if 'logged_in' not in st.session_state:
+    st.session_state['logged_in'] = False
+
+if not st.session_state['logged_in']:
+    st.title("🔒 小資投本比 - 終極防禦終端機")
+    st.markdown("### ⚠️ 系統已上鎖，請驗證您的身份")
+    login_email = st.text_input("請輸入授權的 E-mail 以解鎖系統")
+    if st.button("🔑 登入系統", type="primary"):
+        if login_email.strip() in AUTHORIZED_EMAILS:
+            st.session_state['logged_in'] = True
+            st.success("✅ 授權成功！正在為您啟動終端機...")
+            st.rerun()
+        else:
+            st.error("❌ 查無授權。請確認您的 E-mail 是否正確或聯絡系統管理員。")
+    st.stop()  # 阻擋未登入者執行後續的程式碼
+
+# ==========================================
+# 🚀 終端機主程式 (已授權狀態)
+# ==========================================
 st.title("🏆 小資投本比 - 估值與波動度終極防禦終端機")
 
-# --- 建立暫存記憶體 ---
+# --- 建立暫存記憶體與持久化檔案 ---
+PORTFOLIO_FILE = "portfolio_data.csv"
+
 if 'radar_data' not in st.session_state: st.session_state['radar_data'] = None
 if 'radar_msg' not in st.session_state: st.session_state['radar_msg'] = ""
-if 'portfolio' not in st.session_state: 
-    st.session_state['portfolio'] = pd.DataFrame(columns=["股票", "買進日", "買進價", "股數", "停損價", "停利目標"])
 if 'chat_history' not in st.session_state:
     st.session_state['chat_history'] = [{"role": "assistant", "content": "您好！我是您的專屬量化助理。您可以問我基礎的指標名詞；若在左側輸入 Gemini API 金鑰，我將解鎖為全能 AI 顧問，隨時為您分析大盤與個股！"}]
 
-# 🌟 雙核心 AI 問答引擎 (V47 穩定對接 3.5 Flash-Lite)
+# 📂 自動讀取已儲存的投資庫存
+if 'portfolio' not in st.session_state: 
+    if os.path.exists(PORTFOLIO_FILE):
+        st.session_state['portfolio'] = pd.read_csv(PORTFOLIO_FILE)
+    else:
+        st.session_state['portfolio'] = pd.DataFrame(columns=["股票", "買進日", "買進價", "股數", "停損價", "停利目標"])
+
+# 🌟 雙核心 AI 問答引擎
 def get_bot_answer(prompt, api_key=""):
     def rule_based_answer(text):
         if any(k in text for k in ['核心籌碼', '投本比', '籌碼']): return "**【核心籌碼 / 投本比】**\n指的是「投信買超張數佔公司發行股本的比例」。因為投信屬於主力法人，重金砸在中小型股時容易推升股價。系統要求投本比達標，就是確認這檔股票「有大人在照顧」。"
@@ -42,12 +76,10 @@ def get_bot_answer(prompt, api_key=""):
     if api_key:
         clean_key = api_key.strip()
         try:
-            # 🚀 確實對準最新的 gemini-3.5-flash-lite 模型端點
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={clean_key}"
             sys_prompt = "你是一位精通台股、量化交易與程式碼的頂級交易助理。請用簡潔、專業且帶有一點實戰幽默的口吻，回答用戶的問題。用戶提問："
             payload = {"contents": [{"parts": [{"text": sys_prompt + prompt}]}]}
             
-            # 使用 requests.post 並關閉 SSL 驗證 (verify=False)，避開企業防火牆干擾
             res = requests.post(url, headers={'Content-Type': 'application/json'}, json=payload, timeout=15, verify=False)
             
             if res.status_code == 200:
@@ -130,7 +162,7 @@ mode = st.sidebar.radio("切換系統模組", [
 st.sidebar.markdown("---")
 
 st.sidebar.subheader("🧠 AI 大腦連線設定")
-ui_gemini_key = st.sidebar.text_input("🔑 輸入 Gemini API Key (選填)", type="password", help="填入後，健檢底部的問答小助理將升級為無所不知的全能 AI 顧問！留空則使用內建基礎量化字典。")
+ui_gemini_key = st.sidebar.text_input("🔑 輸入 Gemini API Key (選填)", type="password", help="填入後，健檢底部的問答小助理將升級為無所不知的全能 AI 顧問！")
 st.sidebar.markdown("---")
 
 if mode in ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"]:
@@ -478,12 +510,15 @@ elif mode == "💼 投資追蹤 (進出場管理)":
             with col2:
                 t_shares = st.number_input("買進股數", min_value=1, value=1000, step=1000)
                 t_sl = st.number_input("設定停損價位", min_value=0.0, step=1.0)
-                t_tp = st.number_input("絕對金額停利啟動線 (元)", value=5000, step=1000)
+                t_tp = st.number_input("絕對金額停利啟提線 (元)", value=5000, step=1000)
                 
             if st.form_submit_button("📝 存入投資組合"):
                 new_trade = {"股票": t_stock, "買進日": t_date.strftime("%Y-%m-%d"), "買進價": t_price, "股數": t_shares, "停損價": t_sl, "停利目標": t_tp}
+                # 更新記憶體並同步寫入 CSV 檔案持久化
                 st.session_state['portfolio'] = pd.concat([st.session_state['portfolio'], pd.DataFrame([new_trade])], ignore_index=True)
-                st.success(f"✅ 成功將 {t_stock} 登錄至投資組合！")
+                st.session_state['portfolio'].to_csv(PORTFOLIO_FILE, index=False, encoding='utf-8-sig')
+                
+                st.success(f"✅ 成功將 {t_stock} 登錄至投資組合！已自動存檔。")
                 st.rerun()
 
     if not st.session_state['portfolio'].empty:
@@ -511,5 +546,7 @@ elif mode == "💼 投資追蹤 (進出場管理)":
         st.dataframe(df_p, use_container_width=True, hide_index=True)
         if st.button("🗑️ 清空所有紀錄", type="secondary"):
             st.session_state['portfolio'] = pd.DataFrame(columns=["股票", "買進日", "買進價", "股數", "停損價", "停利目標"])
+            # 清空紀錄時同步覆蓋 CSV 檔案
+            st.session_state['portfolio'].to_csv(PORTFOLIO_FILE, index=False, encoding='utf-8-sig')
             st.rerun()
     else: st.info("目前投資組合為空，請點擊上方「新增交易紀錄」開始管理您的庫存。")
