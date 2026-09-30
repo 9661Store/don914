@@ -38,6 +38,8 @@ if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 if 'role' not in st.session_state: st.session_state['role'] = 'guest'
 if 'user_email' not in st.session_state: st.session_state['user_email'] = ''
 
+# 補上這兩行：初始化雷達掃描的暫存資料，避免 KeyError
+
 # 登入閘門
 if not st.session_state['logged_in']:
     st.title("🔒 小資投本比 - 量化終端機")
