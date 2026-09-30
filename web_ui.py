@@ -15,8 +15,9 @@ ssl._create_default_https_context = ssl._create_unverified_context
 twse_session = requests.Session()
 twse_session.verify = False
 twse_session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Accept': '*/*'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/javascript, */*; q=0.01',
+    'X-Requested-With': 'XMLHttpRequest'
 })
 
 # --- 網頁介面設定 ---
@@ -44,11 +45,103 @@ if not st.session_state['logged_in']:
     st.stop()
 
 # ==========================================
-# 🚀 終端機主程式 (已授權狀態)
+# 🚀 核心資料快取區 (V54 OpenAPI 直連)
+# ==========================================
+@st.cache_data(ttl=86400)
+def load_pe_data():
+    """直接從政府 OpenAPI 抓取全市場本益比，拒絕依賴 Yahoo"""
+    pe_dict = {}
+    try:
+        res_twse = twse_session.get("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", verify=False, timeout=10)
+        if res_twse.status_code == 200:
+            for item in res_twse.json():
+                try:
+                    pe_str = str(item.get('PEratio', '0')).replace(',', '')
+                    if pe_str == '-' or not pe_str: pe_str = '0'
+                    pe_dict[item['Code'].strip()] = float(pe_str)
+                except: pass
+    except: pass
+    
+    try:
+        res_tpex = twse_session.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis", verify=False, timeout=10)
+        if res_tpex.status_code == 200:
+            for item in res_tpex.json():
+                try:
+                    pe_str = str(item.get('PERatio', '0')).replace(',', '')
+                    if pe_str == '-' or not pe_str: pe_str = '0'
+                    pe_dict[item['SecuritiesCompanyCode'].strip()] = float(pe_str)
+                except: pass
+    except: pass
+    return pe_dict
+
+@st.cache_data(ttl=86400)
+def load_company_info():
+    """抓取產業類別，並用政府公布的實收資本額精算發行股數"""
+    info_dict = {}
+    try:
+        res_twse = twse_session.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", verify=False, timeout=15)
+        if res_twse.status_code == 200:
+            for item in res_twse.json():
+                code = str(item.get('公司代號', '')).strip()
+                cap_str = str(item.get('實收資本額', '0')).replace(',', '')
+                if not cap_str or cap_str == '-': cap_str = '0'
+                shares = float(cap_str) / 10
+                info_dict[code] = {
+                    "sector": str(item.get('產業類別', '未知')).strip(),
+                    "business": str(item.get('主要經營業務', '未知')).strip(),
+                    "shares": shares
+                }
+    except: pass
+    try:
+        res_tpex = twse_session.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", verify=False, timeout=15)
+        if res_tpex.status_code == 200:
+            for item in res_tpex.json():
+                code = str(item.get('公司代號', item.get('SecuritiesCompanyCode', ''))).strip()
+                cap_str = str(item.get('實收資本額', '0')).replace(',', '')
+                if not cap_str or cap_str == '-': cap_str = '0'
+                shares = float(cap_str) / 10
+                info_dict[code] = {
+                    "sector": str(item.get('產業類別', item.get('Industry', '未知'))).strip(),
+                    "business": str(item.get('主要經營業務', item.get('MainBusiness', '未知'))).strip(),
+                    "shares": shares
+                }
+    except: pass
+    return info_dict
+
+@st.cache_data(ttl=86400)
+def load_taiwan_stocks():
+    stock_dict = {}
+    try:
+        res_twse = twse_session.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", verify=False, timeout=15)
+        if res_twse.status_code == 200:
+            for item in res_twse.json():
+                code, name = item.get('Code', ''), item.get('Name', '')
+                if len(code) == 4 and code.isdigit(): stock_dict[f"{code} {name} (上市)"] = f"{code}.TW"
+        res_tpex = twse_session.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", verify=False, timeout=15)
+        if res_tpex.status_code == 200:
+            for item in res_tpex.json():
+                code, name = item.get('SecuritiesCompanyCode', ''), item.get('CompanyName', '')
+                if len(code) == 4 and code.isdigit(): stock_dict[f"{code} {name} (上櫃)"] = f"{code}.TWO"
+    except Exception: pass
+    if not stock_dict:
+        stock_dict["2327 國巨 (上市)"] = "2327.TW"
+        stock_dict["4958 臻鼎-KY (上市)"] = "4958.TW"
+        stock_dict["8996 高力 (上市)"] = "8996.TW"
+    return stock_dict
+
+STOCK_DICT = load_taiwan_stocks()
+INFO_DICT = load_company_info()
+PE_DICT = load_pe_data()
+
+if len(STOCK_DICT) <= 3: load_taiwan_stocks.clear()
+if not INFO_DICT: load_company_info.clear()
+if not PE_DICT: load_pe_data.clear()
+
+# ==========================================
+# 🚀 終端機主程式 
 # ==========================================
 st.title("🏆 小資投本比 - 估值與波動度終極防禦終端機")
 
-# --- 建立暫存記憶體與持久化檔案 ---
 PORTFOLIO_FILE = "portfolio_data.csv"
 
 if 'radar_data' not in st.session_state: st.session_state['radar_data'] = None
@@ -102,57 +195,6 @@ def translate_to_zh(text):
     except: pass
     return text 
 
-@st.cache_data(ttl=86400)
-def load_taiwan_stocks():
-    stock_dict = {}
-    try:
-        res_twse = twse_session.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", verify=False, timeout=15)
-        if res_twse.status_code == 200:
-            for item in res_twse.json():
-                code, name = item.get('Code', ''), item.get('Name', '')
-                if len(code) == 4 and code.isdigit(): stock_dict[f"{code} {name} (上市)"] = f"{code}.TW"
-        res_tpex = twse_session.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", verify=False, timeout=15)
-        if res_tpex.status_code == 200:
-            for item in res_tpex.json():
-                code, name = item.get('SecuritiesCompanyCode', ''), item.get('CompanyName', '')
-                if len(code) == 4 and code.isdigit(): stock_dict[f"{code} {name} (上櫃)"] = f"{code}.TWO"
-    except Exception: pass
-    if not stock_dict:
-        stock_dict["2327 國巨 (上市)"] = "2327.TW"
-        stock_dict["4958 臻鼎-KY (上市)"] = "4958.TW"
-        stock_dict["8996 高力 (上市)"] = "8996.TW"
-    return stock_dict
-
-@st.cache_data(ttl=86400)
-def load_company_info():
-    info_dict = {}
-    try:
-        res_twse = twse_session.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", verify=False, timeout=15)
-        if res_twse.status_code == 200:
-            for item in res_twse.json():
-                info_dict[str(item.get('公司代號', '')).strip()] = {
-                    "sector": str(item.get('產業類別', '未知')).strip(),
-                    "business": str(item.get('主要經營業務', '未知')).strip()
-                }
-    except: pass
-    try:
-        res_tpex = twse_session.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", verify=False, timeout=15)
-        if res_tpex.status_code == 200:
-            for item in res_tpex.json():
-                code = str(item.get('公司代號', item.get('SecuritiesCompanyCode', ''))).strip()
-                info_dict[code] = {
-                    "sector": str(item.get('產業類別', item.get('Industry', '未知'))).strip(),
-                    "business": str(item.get('主要經營業務', item.get('MainBusiness', '未知'))).strip()
-                }
-    except: pass
-    return info_dict
-
-STOCK_DICT = load_taiwan_stocks()
-INFO_DICT = load_company_info()
-
-if len(STOCK_DICT) <= 3: load_taiwan_stocks.clear()
-if not INFO_DICT: load_company_info.clear()
-
 # --- 側邊欄：系統模式 ---
 mode = st.sidebar.radio("切換系統模組", [
     "📡 嚴選加權評分雷達", 
@@ -182,7 +224,7 @@ if mode in ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"]
     ui_max_cap = st.sidebar.slider("股本上限 (億)", 10, 500, 200, 10)
 
 elif mode == "⏱️ 個股時光機 (歷史回測)":
-    st.sidebar.header("🎛️️ 回測紀律設定")
+    st.sidebar.header("🎛️ 回測紀律設定")
     ui_capital = st.sidebar.number_input("初始本金 (元)", value=20000, step=5000)
     ui_tp = st.sidebar.number_input("啟動防守獲利門檻 (元)", value=5000, step=1000)
     ui_drawdown = st.sidebar.number_input("獲利回吐出場限制 (元)", value=2000, step=500)
@@ -246,7 +288,7 @@ if mode == "📡 嚴選加權評分雷達":
                     except Exception as e: st.error(f"⚠️ 解析錯誤：{e}")
             else: st.warning("⚠️ 請先上傳 CSV 檔案！")
         else:
-            with st.spinner("☁️ 正在雲端進行波動度與嚴格過濾..."):
+            with st.spinner("☁️ 正在連線政府資料庫與批次運算 (免封鎖極速版)..."):
                 stock_list, target_date = [], datetime.datetime.now()
                 for _ in range(7):
                     try:
@@ -266,99 +308,116 @@ if mode == "📡 嚴選加權評分雷達":
                     if stock_list: break
                     target_date -= datetime.timedelta(days=1)
 
-                debug_logs = [] # 🛠️ 紀錄每一檔被淘汰的原因
+                debug_logs = []
                 
                 if not stock_list: 
                     st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 雲端完全抓不到今日或近期的投信買賣超紀錄。"
                 else:
-                    my_bar, results = st.progress(0, text=f"🔍 發現 {len(stock_list)} 檔投信買超標的，執行過濾中..."), []
-                    for i, stock in enumerate(stock_list):
-                        if i % max(1, (len(stock_list) // 10)) == 0: my_bar.progress((i + 1) / len(stock_list))
-                        try:
-                            # 🛡️ 終極修復：拔除 session！讓 yfinance 用它原生的連線機制突破 Yahoo 的防爬蟲
-                            ticker = yf.Ticker(f"{stock['code']}{stock['market']}")
+                    ticker_symbols = [f"{stock['code']}{stock['market']}" for stock in stock_list]
+                    my_bar = st.progress(0, text=f"🚀 向 Yahoo 批次發送 {len(ticker_symbols)} 檔請求中...")
+                    
+                    try:
+                        # 🛡️ 核心大升級：改用 yf.download 批次下載，突破 100 次的頻率封鎖網！
+                        hist_data = yf.download(ticker_symbols, period="3mo", group_by='ticker', progress=False)
+                    except Exception as e:
+                        debug_logs.append(f"⚠️ 批次下載異常: {e}")
+                        hist_data = pd.DataFrame()
+                        
+                    results = []
+                    
+                    if not hist_data.empty:
+                        for i, stock in enumerate(stock_list):
+                            my_bar.progress((i + 1) / len(stock_list), text="🧮 對接 OpenAPI 計算基本面與技術指標...")
+                            code = stock['code']
+                            symbol = f"{code}{stock['market']}"
                             
-                            hist = ticker.history(period="3mo")
-                            if hist.empty:
-                                debug_logs.append(f"{stock['code']} {stock['name']} ❌ 遭淘汰：Yahoo API 抓不到 K 線資料")
-                                continue
+                            try:
+                                # 🛡️ 政府 OpenAPI 直連，永遠抓得到本益比跟股本
+                                pe_ratio = PE_DICT.get(code, 0)
+                                if pe_ratio > ui_max_pe and pe_ratio != 0:
+                                    debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：本益比過高 ({pe_ratio} > {ui_max_pe})")
+                                    continue
                                 
-                            if len(hist) < 20 or float(hist['Close'].iloc[-1]) < 10.0:
-                                debug_logs.append(f"{stock['code']} {stock['name']} ❌ 遭淘汰：上市未滿20天或股價 < 10元")
-                                continue
-                            
-                            if (float(hist['Volume'].rolling(5).mean().iloc[-1]) / 1000) < ui_min_vol:
-                                debug_logs.append(f"{stock['code']} {stock['name']} ❌ 遭淘汰：成交量過低 (<{ui_min_vol}千張)")
-                                continue
-                            
-                            avg_amp = round((((hist['High'] - hist['Low']) / hist['Close'].shift(1)) * 100).tail(5).mean(), 2)
-                            if avg_amp < ui_min_amplitude:
-                                debug_logs.append(f"{stock['code']} {stock['name']} ❌ 遭淘汰：5日均振幅太小 ({avg_amp}% < {ui_min_amplitude}%)")
+                                shares = INFO_DICT.get(code, {}).get('shares', 0)
+                                it_ratio = 0.0
+                                if shares > 0:
+                                    it_ratio = round(((stock['it_buy'] * 2.5) / shares) * 100, 2)
+                                    if it_ratio < ui_min_it_ratio:
+                                        debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：投本比未達標 ({it_ratio}%)")
+                                        continue
+                                    if round(shares / 10000000, 2) > ui_max_cap:
+                                        debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：股本過大")
+                                        continue
+                                else:
+                                    it_ratio = 99.9  # 免死金牌放行
+                                    
+                                # 從批次資料庫中提款 K 線
+                                if isinstance(hist_data.columns, pd.MultiIndex):
+                                    if symbol not in hist_data.columns.get_level_values(0):
+                                        debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：Yahoo 無提供 K 線")
+                                        continue
+                                    stock_df = hist_data[symbol]
+                                else:
+                                    stock_df = hist_data
+                                    
+                                if 'Close' not in stock_df.columns:
+                                    continue
+                                    
+                                stock_close = pd.to_numeric(stock_df['Close'], errors='coerce').dropna()
+                                stock_high = pd.to_numeric(stock_df['High'], errors='coerce').dropna()
+                                stock_low = pd.to_numeric(stock_df['Low'], errors='coerce').dropna()
+                                stock_vol = pd.to_numeric(stock_df['Volume'], errors='coerce').dropna()
+                                
+                                if len(stock_close) < 20 or float(stock_close.iloc[-1]) < 10.0:
+                                    debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：上市未滿20天或低於10元")
+                                    continue
+                                
+                                current_vol = float(stock_vol.tail(5).mean()) / 1000
+                                if current_vol < ui_min_vol:
+                                    debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：均量低於 {ui_min_vol} 千張")
+                                    continue
+                                
+                                avg_amp = round((((stock_high - stock_low) / stock_close.shift(1)) * 100).tail(5).mean(), 2)
+                                if avg_amp < ui_min_amplitude:
+                                    debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：5日振幅太小 ({avg_amp}%)")
+                                    continue 
+                                
+                                ma20 = stock_close.rolling(20).mean().iloc[-1]
+                                bias = round(((float(stock_close.iloc[-1]) - float(ma20)) / float(ma20)) * 100, 2)
+                                if not (-ui_bias_max <= bias <= ui_bias_max):
+                                    debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：乖離率超標 ({bias}%)")
+                                    continue
+                                
+                                score = 55
+                                low9, high9 = stock_low.rolling(9).min(), stock_high.rolling(9).max()
+                                k_series = ((stock_close - low9) / (high9 - low9) * 100).ewm(alpha=1/3, adjust=False).mean()
+                                d_series = k_series.ewm(alpha=1/3, adjust=False).mean()
+                                k_val, d_val = round(k_series.iloc[-1], 2), round(d_series.iloc[-1], 2)
+                                if k_val > d_val and k_val <= 80: score += 25
+                                elif k_val > d_val: score += 15
+                                
+                                delta = stock_close.diff()
+                                rsi_series = 100 - (100 / (1 + (delta.clip(lower=0).ewm(alpha=1/12, adjust=False).mean() / -delta.clip(upper=0).ewm(alpha=1/12, adjust=False).mean())))
+                                rsi_val = round(rsi_series.iloc[-1], 2)
+                                if rsi_val >= 50: score += 20
+                                
+                                results.append({
+                                    '代碼': stock['code'], 
+                                    '名稱': stock['name'], 
+                                    '綜合得分': score, 
+                                    '投本比(%)': it_ratio if it_ratio != 99.9 else 'N/A', 
+                                    '本益比': round(pe_ratio, 2) if pe_ratio > 0 else 'N/A', 
+                                    '5日均振幅(%)': avg_amp, 
+                                    'BIAS(20日)': bias, 
+                                    'K值': k_val, 
+                                    'RSI(12日)': rsi_val
+                                })
+                                debug_logs.append(f"{code} {stock['name']} ✅ 成功過關存活！")
+                            except Exception as e: 
+                                debug_logs.append(f"{code} {stock['name']} ⚠️ 發生程式錯誤：{e}")
                                 continue 
                             
-                            bias = round(((float(hist['Close'].iloc[-1]) - float(hist['Close'].rolling(20).mean().iloc[-1])) / float(hist['Close'].rolling(20).mean().iloc[-1])) * 100, 2)
-                            if not (-ui_bias_max <= bias <= ui_bias_max):
-                                debug_logs.append(f"{stock['code']} {stock['name']} ❌ 遭淘汰：乖離率超標 ({bias}%)")
-                                continue
-                            
-                            # 嘗試獲取股本與本益比
-                            try:
-                                shares = getattr(ticker.fast_info, 'shares', 0)
-                                if not shares: shares = ticker.info.get('sharesOutstanding', 0)
-                                if not shares:
-                                    mcap = getattr(ticker.fast_info, 'market_cap', 0) or ticker.info.get('marketCap', 0)
-                                    if mcap: shares = mcap / float(hist['Close'].iloc[-1])
-                            except:
-                                shares = 0
-                                
-                            it_ratio = 0.0
-                            if shares and shares > 0:
-                                it_ratio = round(((stock['it_buy'] * 2.5) / shares) * 100, 2)
-                                if it_ratio < ui_min_it_ratio:
-                                    debug_logs.append(f"{stock['code']} {stock['name']} ❌ 遭淘汰：投本比未達標 ({it_ratio}% < {ui_min_it_ratio}%)")
-                                    continue
-                                if round(shares / 10000000, 2) > ui_max_cap:
-                                    debug_logs.append(f"{stock['code']} {stock['name']} ❌ 遭淘汰：股本過大")
-                                    continue
-                            else:
-                                it_ratio = 99.9 
-                                
-                            pe_ratio = ticker.info.get('trailingPE') or ticker.info.get('forwardPE') or 0
-                            if pe_ratio > ui_max_pe and pe_ratio != 0:
-                                debug_logs.append(f"{stock['code']} {stock['name']} ❌ 遭淘汰：本益比過高 ({round(pe_ratio,1)} > {ui_max_pe})")
-                                continue
-                            
-                            score = 55
-                            low9, high9 = hist['Low'].rolling(9).min(), hist['High'].rolling(9).max()
-                            hist['K'] = ((hist['Close'] - low9) / (high9 - low9) * 100).ewm(alpha=1/3, adjust=False).mean()
-                            hist['D'] = hist['K'].ewm(alpha=1/3, adjust=False).mean()
-                            k_val, d_val = round(hist['K'].iloc[-1], 2), round(hist['D'].iloc[-1], 2)
-                            if k_val > d_val and k_val <= 80: score += 25
-                            elif k_val > d_val: score += 15
-                            
-                            delta = hist['Close'].diff()
-                            rsi_val = round((100 - (100 / (1 + (delta.clip(lower=0).ewm(alpha=1/12, adjust=False).mean() / -delta.clip(upper=0).ewm(alpha=1/12, adjust=False).mean())))).iloc[-1], 2)
-                            if rsi_val >= 50: score += 20
-                            
-                            results.append({
-                                '代碼': stock['code'], 
-                                '名稱': stock['name'], 
-                                '綜合得分': score, 
-                                '投本比(%)': it_ratio if it_ratio != 99.9 else 'N/A', 
-                                '本益比': round(pe_ratio, 2) if pe_ratio > 0 else 'N/A', 
-                                '5日均振幅(%)': avg_amp, 
-                                'BIAS(20日)': bias, 
-                                'K值': k_val, 
-                                'RSI(12日)': rsi_val
-                            })
-                            debug_logs.append(f"{stock['code']} {stock['name']} ✅ 成功存活！")
-                        except Exception as e: 
-                            debug_logs.append(f"{stock['code']} {stock['name']} ⚠️ 發生程式錯誤：{e}")
-                            continue 
-                            
                     my_bar.empty()
-                    
-                    # 🛠️ 將除錯日誌存入 session 狀態供 UI 顯示
                     st.session_state['debug_logs'] = debug_logs
                     
                     if results:
@@ -374,7 +433,6 @@ if mode == "📡 嚴選加權評分雷達":
         else: 
             st.warning(st.session_state['radar_msg'])
             
-        # 🛠️️ 顯示開發者透視眼
         if 'debug_logs' in st.session_state and st.session_state['debug_logs']:
             with st.expander("🛠️ 開發者透視眼 (點擊查看：每檔股票為何被淘汰？)"):
                 for log in st.session_state['debug_logs']:
@@ -395,17 +453,16 @@ elif mode == "🎯 個股健檢 (標的審查)":
         
         with st.spinner(f"正在為 {check_stock} 進行基本面與技術面掃描..."):
             try:
-                # 🛡️ 拔除 session
-                ticker = yf.Ticker(yahoo_ticker)
-                hist = ticker.history(period="3mo")
-                info = ticker.info
+                hist = yf.Ticker(yahoo_ticker).history(period="3mo")
                 
-                if hist.empty: st.error("⚠️ 無法取得歷史資料。請確認網路或稍後再試。")
+                if hist.empty: st.error("⚠️️ 無法取得歷史資料。請確認網路或稍後再試。")
                 else:
                     close = round(hist['Close'].iloc[-1], 2)
                     ma20 = hist['Close'].rolling(window=20).mean()
                     bias = round(((hist['Close'] - ma20) / ma20).iloc[-1] * 100, 2)
-                    pe_ratio = info.get('trailingPE') or info.get('forwardPE') or 0
+                    
+                    pe_ratio = PE_DICT.get(stock_code, 0)
+                    
                     hist['Amplitude'] = ((hist['High'] - hist['Low']) / hist['Close'].shift(1)) * 100
                     avg_amp = round(hist['Amplitude'].tail(5).mean(), 2)
                     low9, high9 = hist['Low'].rolling(9).min(), hist['High'].rolling(9).max()
@@ -430,15 +487,7 @@ elif mode == "🎯 個股健檢 (標的審查)":
                         if it_buy > 0: break
                         target_date -= datetime.timedelta(days=1)
                         
-                    try:
-                        shares = getattr(ticker.fast_info, 'shares', 0)
-                        if not shares: shares = info.get('sharesOutstanding', 0)
-                        if not shares:
-                            mcap = getattr(ticker.fast_info, 'market_cap', 0) or info.get('marketCap', 0)
-                            if mcap: shares = mcap / close
-                    except:
-                        shares = 0
-                        
+                    shares = INFO_DICT.get(stock_code, {}).get('shares', 0)
                     real_it_ratio = round(((it_buy * 2.5) / shares) * 100, 2) if shares > 0 and it_buy > 0 else 0.0
                     
                     st.markdown(f"### 📊 【{check_stock}】 目前現價: {close} 元")
@@ -447,12 +496,8 @@ elif mode == "🎯 個股健檢 (標的審查)":
                         comp_info = INFO_DICT.get(stock_code, {})
                         sector_tw, business_tw = comp_info.get('sector', ''), comp_info.get('business', '')
                         if not sector_tw or sector_tw == '未知':
-                            st.warning("🔄 啟用備援資料庫：正在為您將外文業務說明自動翻譯成繁體中文...")
-                            raw_sector, raw_business = info.get('sector', '未知'), info.get('longBusinessSummary', '未知')
-                            sector_tw = translate_to_zh(raw_sector) if raw_sector != '未知' else raw_sector
-                            business_tw = translate_to_zh(raw_business) if raw_business != '未知' else raw_business
-                        market_cap = info.get('marketCap', 0)
-                        st.markdown(f"**🏭 產業類別：** {sector_tw}\n\n**💰 預估市值：** {round(market_cap / 100000000, 2)} 億台幣" if market_cap else "未知")
+                            st.warning("🔄 啟用備援資料庫：無官方業務簡介。")
+                        st.markdown(f"**🏭 產業類別：** {sector_tw}")
                         st.markdown(f"**📝 主要業務：** {business_tw}")
                     
                     pass_all = True
@@ -524,9 +569,7 @@ elif mode == "⏱️ 個股時光機 (歷史回測)":
         yahoo_ticker = STOCK_DICT[selected_stock]
         with st.spinner("正在下載資料並回測..."):
             try:
-                # 🛡️ 拔除 session
-                ticker = yf.Ticker(yahoo_ticker)
-                hist = ticker.history(period="1y") 
+                hist = yf.Ticker(yahoo_ticker).history(period="1y") 
                 if hist.empty: st.error("⚠️ 抓不到資料！")
                 else:
                     hist['MA20'] = hist['Close'].rolling(20).mean()
@@ -614,7 +657,6 @@ elif mode == "💼 投資追蹤 (進出場管理)":
             live_prices = []
             for idx, row in df_p.iterrows():
                 try:
-                    # 🛡️ 拔除 session
                     hist = yf.Ticker(STOCK_DICT.get(row['股票'], "2330.TW")).history(period="5d")
                     live_prices.append(round(hist['Close'].iloc[-1], 2) if not hist.empty else row['買進價'])
                 except: live_prices.append(row['買進價'])
