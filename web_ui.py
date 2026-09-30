@@ -8,7 +8,7 @@ import ssl
 import urllib3
 import os
 
-# --- 破解 SSL 防火牆與限流設定 ---
+# --- 破解 SSL 防火牆與限流設定 (僅供 TWSE/TPEx/Gemini 使用) ---
 warnings.filterwarnings('ignore')
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -154,7 +154,7 @@ if not INFO_DICT: load_company_info.clear()
 mode = st.sidebar.radio("切換系統模組", [
     "📡 嚴選加權評分雷達", 
     "🎯 個股健檢 (標的審查)", 
-    "⏱️ 個股時光機 (歷史回測)", 
+    "⏱️️ 個股時光機 (歷史回測)", 
     "💼 投資追蹤 (進出場管理)"
 ])
 st.sidebar.markdown("---")
@@ -169,7 +169,7 @@ if mode in ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"]
     ui_bias_max = st.sidebar.slider("乖離率容忍上限 (%)", 3.0, 15.0, 8.0, 0.5, help="超出此區間直接剔除")
     
     st.sidebar.markdown("---")
-    st.sidebar.subheader("🛡️️ 估值與波動度防禦")
+    st.sidebar.subheader("🛡 估值與波動度防禦")
     ui_max_pe = st.sidebar.slider("本益比上限 (倍)", 5.0, 60.0, 20.0, 1.0, help="防禦估值過高飆股")
     ui_min_amplitude = st.sidebar.slider("5日均振幅下限 (%)", 1.0, 10.0, 3.5, 0.5, help="剔除股性死魚的標的")
     
@@ -243,7 +243,7 @@ if mode == "📡 嚴選加權評分雷達":
                     except Exception as e: st.error(f"⚠️ 解析錯誤：{e}")
             else: st.warning("⚠️ 請先上傳 CSV 檔案！")
         else:
-            with st.spinner("☁️ 正在雲端進行波動度與嚴格過濾..."):
+            with st.spinner("☁️ 正在雲端進行波動度與嚴格過濾 (管線最佳化高速版)..."):
                 stock_list, target_date = [], datetime.datetime.now()
                 for _ in range(3):
                     try:
@@ -265,27 +265,14 @@ if mode == "📡 嚴選加權評分雷達":
 
                 if not stock_list: st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 雲端暫無投信買超紀錄。"
                 else:
-                    my_bar, results = st.progress(0, text="執行估值與波動度防禦網中..."), []
+                    my_bar, results = st.progress(0, text="執行高速防禦過濾網中..."), []
                     for i, stock in enumerate(stock_list):
                         if i % max(1, (len(stock_list) // 10)) == 0: my_bar.progress((i + 1) / len(stock_list))
                         try:
-                            ticker = yf.Ticker(f"{stock['code']}{stock['market']}", session=session)
+                            # 🛡️ 核心修復1：移除被污染的 session，使用 yfinance 原生安全連線
+                            ticker = yf.Ticker(f"{stock['code']}{stock['market']}")
                             
-                            # 🛡️ 防禦1：優先使用穩定的 fast_info 取代容易壞掉的 info 來抓發行股數
-                            try:
-                                shares = ticker.fast_info.get('shares', 0)
-                            except:
-                                shares = ticker.info.get('sharesOutstanding', 0)
-                                
-                            if not shares or shares <= 0 or round(shares / 10000000, 2) > ui_max_cap: continue
-                            
-                            it_ratio = round(((stock['it_buy'] * 2.5) / shares) * 100, 2)
-                            if it_ratio < ui_min_it_ratio: continue
-                            
-                            # 🛡️ 防禦2：本益比若抓不到(0)，給予放行，只針對明確「大於上限且不是0」的標的開鍘
-                            pe_ratio = ticker.info.get('trailingPE') or ticker.info.get('forwardPE') or 0
-                            if pe_ratio > ui_max_pe and pe_ratio != 0: continue
-                            
+                            # 🛡️ 核心修復2：先檢查歷史數據與量能，淘汰掉 80% 的標的，大幅減少後續 API 請求
                             hist = ticker.history(start=(target_date - datetime.timedelta(days=60)).strftime('%Y-%m-%d'))
                             if len(hist) < 20 or float(hist['Close'].iloc[-1]) < 10.0: continue
                             
@@ -297,6 +284,22 @@ if mode == "📡 嚴選加權評分雷達":
                             bias = round(((float(hist['Close'].iloc[-1]) - float(hist['Close'].rolling(20).mean().iloc[-1])) / float(hist['Close'].rolling(20).mean().iloc[-1])) * 100, 2)
                             if not (-ui_bias_max <= bias <= ui_bias_max): continue
                             
+                            # 到了這一步，通常只剩下幾檔菁英，這時才去要容易被封鎖的基本面數據
+                            try:
+                                shares = getattr(ticker.fast_info, 'shares', 0)
+                                if not shares: shares = ticker.info.get('sharesOutstanding', 0)
+                            except:
+                                shares = ticker.info.get('sharesOutstanding', 0)
+                                
+                            if not shares or shares <= 0 or round(shares / 10000000, 2) > ui_max_cap: continue
+                            
+                            it_ratio = round(((stock['it_buy'] * 2.5) / shares) * 100, 2)
+                            if it_ratio < ui_min_it_ratio: continue
+                            
+                            pe_ratio = ticker.info.get('trailingPE') or ticker.info.get('forwardPE') or 0
+                            if pe_ratio > ui_max_pe and pe_ratio != 0: continue
+                            
+                            # 計算技術指標
                             score = 55
                             low9, high9 = hist['Low'].rolling(9).min(), hist['High'].rolling(9).max()
                             hist['K'] = ((hist['Close'] - low9) / (high9 - low9) * 100).ewm(alpha=1/3, adjust=False).mean()
@@ -310,12 +313,13 @@ if mode == "📡 嚴選加權評分雷達":
                             if rsi_val >= 50: score += 20
                             
                             results.append({'代碼': stock['code'], '名稱': stock['name'], '綜合得分': score, '投本比(%)': it_ratio, '本益比': round(pe_ratio, 2) if pe_ratio > 0 else 'N/A', '5日均振幅(%)': avg_amp, 'BIAS(20日)': bias, 'K值': k_val, 'RSI(12日)': rsi_val})
-                        except: continue
-                        
+                        except Exception: 
+                            continue # 若抓取失敗直接換下一檔，不讓系統崩潰
+                            
                     my_bar.empty()
                     if results:
                         st.session_state['radar_data'] = pd.DataFrame(results).sort_values('綜合得分', ascending=False)
-                        st.session_state['radar_msg'] = f"🎉 嚴選完成！排除牛皮股後，共存活 {len(st.session_state['radar_data'])} 檔標的："
+                        st.session_state['radar_msg'] = f"🎉 嚴選完成！排除弱勢股後，共存活 {len(st.session_state['radar_data'])} 檔菁英標的："
                     else: st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 條件過於嚴格，本次無標的存活。"
 
     if st.session_state['radar_data'] is not None:
@@ -339,7 +343,8 @@ elif mode == "🎯 個股健檢 (標的審查)":
         
         with st.spinner(f"正在為 {check_stock} 進行基本面與技術面掃描..."):
             try:
-                ticker = yf.Ticker(yahoo_ticker, session=session)
+                # 🛡️ 移除 session
+                ticker = yf.Ticker(yahoo_ticker)
                 hist = ticker.history(period="3mo")
                 info = ticker.info
                 
@@ -374,7 +379,8 @@ elif mode == "🎯 個股健檢 (標的審查)":
                         target_date -= datetime.timedelta(days=1)
                         
                     try:
-                        shares = ticker.fast_info.get('shares', 0)
+                        shares = getattr(ticker.fast_info, 'shares', 0)
+                        if not shares: shares = info.get('sharesOutstanding', 0)
                     except:
                         shares = info.get('sharesOutstanding', 0)
                         
@@ -405,7 +411,6 @@ elif mode == "🎯 個股健檢 (標的審查)":
                         if status == "❌ 淘汰": pass_all = False
                         st.metric(f"BIAS (±{ui_bias_max}%)", f"{bias}%", status)
                     with col3:
-                        # 放寬健檢本益比：大於上限且不是0才淘汰
                         status = "✅ 過關" if (0 < pe_ratio <= ui_max_pe) or pe_ratio == 0 else "❌ 淘汰"
                         if status == "❌ 淘汰": pass_all = False
                         st.metric(f"本益比 (<{ui_max_pe})", f"{round(pe_ratio, 2)} 倍" if pe_ratio > 0 else "無/虧損", status)
@@ -463,7 +468,8 @@ elif mode == "⏱️ 個股時光機 (歷史回測)":
         yahoo_ticker = STOCK_DICT[selected_stock]
         with st.spinner("正在下載資料並回測..."):
             try:
-                ticker = yf.Ticker(yahoo_ticker, session=session)
+                # 🛡️ 移除 session
+                ticker = yf.Ticker(yahoo_ticker)
                 hist = ticker.history(start=(start_date - datetime.timedelta(days=40)).strftime("%Y-%m-%d"))
                 if hist.empty: st.error("⚠️ 抓不到資料！")
                 else:
@@ -547,7 +553,8 @@ elif mode == "💼 投資追蹤 (進出場管理)":
             live_prices = []
             for idx, row in df_p.iterrows():
                 try:
-                    hist = yf.Ticker(STOCK_DICT.get(row['股票'], "2330.TW"), session=session).history(period="5d")
+                    # 🛡️ 移除 session
+                    hist = yf.Ticker(STOCK_DICT.get(row['股票'], "2330.TW")).history(period="5d")
                     live_prices.append(round(hist['Close'].iloc[-1], 2) if not hist.empty else row['買進價'])
                 except: live_prices.append(row['買進價'])
             
