@@ -22,7 +22,6 @@ st.set_page_config(page_title="小資投本比 旗艦終端機", page_icon="🚀
 # ==========================================
 # 🛡️ 系統授權登入閘門
 # ==========================================
-# 👈 已為您設定專屬授權 E-mail
 AUTHORIZED_EMAILS = ["w184813740@hotmail.com"] 
 
 if 'logged_in' not in st.session_state:
@@ -39,7 +38,7 @@ if not st.session_state['logged_in']:
             st.rerun()
         else:
             st.error("❌ 查無授權。請確認您的 E-mail 是否正確或聯絡系統管理員。")
-    st.stop()  # 阻擋未登入者執行後續的程式碼
+    st.stop()
 
 # ==========================================
 # 🚀 終端機主程式 (已授權狀態)
@@ -54,7 +53,6 @@ if 'radar_msg' not in st.session_state: st.session_state['radar_msg'] = ""
 if 'chat_history' not in st.session_state:
     st.session_state['chat_history'] = [{"role": "assistant", "content": "您好！我是您的專屬量化助理。您可以問我基礎的指標名詞；若在左側輸入 Gemini API 金鑰，我將解鎖為全能 AI 顧問，隨時為您分析大盤與個股！"}]
 
-# 📂 自動讀取已儲存的投資庫存
 if 'portfolio' not in st.session_state: 
     if os.path.exists(PORTFOLIO_FILE):
         st.session_state['portfolio'] = pd.read_csv(PORTFOLIO_FILE)
@@ -171,7 +169,7 @@ if mode in ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"]
     ui_bias_max = st.sidebar.slider("乖離率容忍上限 (%)", 3.0, 15.0, 8.0, 0.5, help="超出此區間直接剔除")
     
     st.sidebar.markdown("---")
-    st.sidebar.subheader("🛡️ 估值與波動度防禦")
+    st.sidebar.subheader("🛡️️ 估值與波動度防禦")
     ui_max_pe = st.sidebar.slider("本益比上限 (倍)", 5.0, 60.0, 20.0, 1.0, help="防禦估值過高飆股")
     ui_min_amplitude = st.sidebar.slider("5日均振幅下限 (%)", 1.0, 10.0, 3.5, 0.5, help="剔除股性死魚的標的")
     
@@ -272,19 +270,33 @@ if mode == "📡 嚴選加權評分雷達":
                         if i % max(1, (len(stock_list) // 10)) == 0: my_bar.progress((i + 1) / len(stock_list))
                         try:
                             ticker = yf.Ticker(f"{stock['code']}{stock['market']}", session=session)
-                            info = ticker.info
-                            pe_ratio = info.get('trailingPE') or info.get('forwardPE') or 0
-                            if pe_ratio <= 0 or pe_ratio > ui_max_pe: continue
-                            hist = ticker.history(start=(target_date - datetime.timedelta(days=60)).strftime('%Y-%m-%d'))
-                            if len(hist) < 20 or float(hist['Close'].iloc[-1]) < 10.0: continue
-                            avg_amp = round((((hist['High'] - hist['Low']) / hist['Close'].shift(1)) * 100).tail(5).mean(), 2)
-                            if avg_amp < ui_min_amplitude: continue 
-                            shares = info.get('sharesOutstanding', 0)
-                            if not shares or shares <= 0 or round(shares / 10000000, 2) > ui_max_cap or (float(hist['Volume'].rolling(5).mean().iloc[-1]) / 1000) < ui_min_vol: continue
+                            
+                            # 🛡️ 防禦1：優先使用穩定的 fast_info 取代容易壞掉的 info 來抓發行股數
+                            try:
+                                shares = ticker.fast_info.get('shares', 0)
+                            except:
+                                shares = ticker.info.get('sharesOutstanding', 0)
+                                
+                            if not shares or shares <= 0 or round(shares / 10000000, 2) > ui_max_cap: continue
+                            
                             it_ratio = round(((stock['it_buy'] * 2.5) / shares) * 100, 2)
                             if it_ratio < ui_min_it_ratio: continue
+                            
+                            # 🛡️ 防禦2：本益比若抓不到(0)，給予放行，只針對明確「大於上限且不是0」的標的開鍘
+                            pe_ratio = ticker.info.get('trailingPE') or ticker.info.get('forwardPE') or 0
+                            if pe_ratio > ui_max_pe and pe_ratio != 0: continue
+                            
+                            hist = ticker.history(start=(target_date - datetime.timedelta(days=60)).strftime('%Y-%m-%d'))
+                            if len(hist) < 20 or float(hist['Close'].iloc[-1]) < 10.0: continue
+                            
+                            if (float(hist['Volume'].rolling(5).mean().iloc[-1]) / 1000) < ui_min_vol: continue
+                            
+                            avg_amp = round((((hist['High'] - hist['Low']) / hist['Close'].shift(1)) * 100).tail(5).mean(), 2)
+                            if avg_amp < ui_min_amplitude: continue 
+                            
                             bias = round(((float(hist['Close'].iloc[-1]) - float(hist['Close'].rolling(20).mean().iloc[-1])) / float(hist['Close'].rolling(20).mean().iloc[-1])) * 100, 2)
                             if not (-ui_bias_max <= bias <= ui_bias_max): continue
+                            
                             score = 55
                             low9, high9 = hist['Low'].rolling(9).min(), hist['High'].rolling(9).max()
                             hist['K'] = ((hist['Close'] - low9) / (high9 - low9) * 100).ewm(alpha=1/3, adjust=False).mean()
@@ -292,11 +304,14 @@ if mode == "📡 嚴選加權評分雷達":
                             k_val, d_val = round(hist['K'].iloc[-1], 2), round(hist['D'].iloc[-1], 2)
                             if k_val > d_val and k_val <= 80: score += 25
                             elif k_val > d_val: score += 15
+                            
                             delta = hist['Close'].diff()
                             rsi_val = round((100 - (100 / (1 + (delta.clip(lower=0).ewm(alpha=1/12, adjust=False).mean() / -delta.clip(upper=0).ewm(alpha=1/12, adjust=False).mean())))).iloc[-1], 2)
                             if rsi_val >= 50: score += 20
-                            results.append({'代碼': stock['code'], '名稱': stock['name'], '綜合得分': score, '投本比(%)': it_ratio, '本益比': round(pe_ratio, 2), '5日均振幅(%)': avg_amp, 'BIAS(20日)': bias, 'K值': k_val, 'RSI(12日)': rsi_val})
+                            
+                            results.append({'代碼': stock['code'], '名稱': stock['name'], '綜合得分': score, '投本比(%)': it_ratio, '本益比': round(pe_ratio, 2) if pe_ratio > 0 else 'N/A', '5日均振幅(%)': avg_amp, 'BIAS(20日)': bias, 'K值': k_val, 'RSI(12日)': rsi_val})
                         except: continue
+                        
                     my_bar.empty()
                     if results:
                         st.session_state['radar_data'] = pd.DataFrame(results).sort_values('綜合得分', ascending=False)
@@ -358,7 +373,11 @@ elif mode == "🎯 個股健檢 (標的審查)":
                         if it_buy > 0: break
                         target_date -= datetime.timedelta(days=1)
                         
-                    shares = info.get('sharesOutstanding', 0)
+                    try:
+                        shares = ticker.fast_info.get('shares', 0)
+                    except:
+                        shares = info.get('sharesOutstanding', 0)
+                        
                     real_it_ratio = round(((it_buy * 2.5) / shares) * 100, 2) if shares > 0 and it_buy > 0 else 0.0
                     
                     st.markdown(f"### 📊 【{check_stock}】 目前現價: {close} 元")
@@ -386,7 +405,8 @@ elif mode == "🎯 個股健檢 (標的審查)":
                         if status == "❌ 淘汰": pass_all = False
                         st.metric(f"BIAS (±{ui_bias_max}%)", f"{bias}%", status)
                     with col3:
-                        status = "✅ 過關" if 0 < pe_ratio <= ui_max_pe else "❌ 淘汰"
+                        # 放寬健檢本益比：大於上限且不是0才淘汰
+                        status = "✅ 過關" if (0 < pe_ratio <= ui_max_pe) or pe_ratio == 0 else "❌ 淘汰"
                         if status == "❌ 淘汰": pass_all = False
                         st.metric(f"本益比 (<{ui_max_pe})", f"{round(pe_ratio, 2)} 倍" if pe_ratio > 0 else "無/虧損", status)
                         
@@ -514,7 +534,6 @@ elif mode == "💼 投資追蹤 (進出場管理)":
                 
             if st.form_submit_button("📝 存入投資組合"):
                 new_trade = {"股票": t_stock, "買進日": t_date.strftime("%Y-%m-%d"), "買進價": t_price, "股數": t_shares, "停損價": t_sl, "停利目標": t_tp}
-                # 更新記憶體並同步寫入 CSV 檔案持久化
                 st.session_state['portfolio'] = pd.concat([st.session_state['portfolio'], pd.DataFrame([new_trade])], ignore_index=True)
                 st.session_state['portfolio'].to_csv(PORTFOLIO_FILE, index=False, encoding='utf-8-sig')
                 
@@ -546,7 +565,6 @@ elif mode == "💼 投資追蹤 (進出場管理)":
         st.dataframe(df_p, use_container_width=True, hide_index=True)
         if st.button("🗑️ 清空所有紀錄", type="secondary"):
             st.session_state['portfolio'] = pd.DataFrame(columns=["股票", "買進日", "買進價", "股數", "停損價", "停利目標"])
-            # 清空紀錄時同步覆蓋 CSV 檔案
             st.session_state['portfolio'].to_csv(PORTFOLIO_FILE, index=False, encoding='utf-8-sig')
             st.rerun()
     else: st.info("目前投資組合為空，請點擊上方「新增交易紀錄」開始管理您的庫存。")
