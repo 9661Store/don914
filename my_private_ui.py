@@ -34,11 +34,16 @@ def get_auth_list():
     with open(AUTH_FILE, "r") as f:
         return [line.strip().lower() for line in f.readlines() if line.strip()]
 
+# 💡 絕對防禦：將所有暫存變數宣告於最頂端，徹底根除 KeyError
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 if 'role' not in st.session_state: st.session_state['role'] = 'guest'
 if 'user_email' not in st.session_state: st.session_state['user_email'] = ''
-
-# 補上這兩行：初始化雷達掃描的暫存資料，避免 KeyError
+if 'radar_data' not in st.session_state: st.session_state['radar_data'] = None
+if 'radar_msg' not in st.session_state: st.session_state['radar_msg'] = ""
+if 'debug_logs' not in st.session_state: st.session_state['debug_logs'] = []
+if 'portfolio' not in st.session_state: 
+    if os.path.exists(PORTFOLIO_FILE): st.session_state['portfolio'] = pd.read_csv(PORTFOLIO_FILE)
+    else: st.session_state['portfolio'] = pd.DataFrame(columns=["股票", "買進日", "買進價", "股數", "停損價", "停利目標"])
 
 # 登入閘門
 if not st.session_state['logged_in']:
@@ -51,16 +56,15 @@ if not st.session_state['logged_in']:
         if login_email in auth_list:
             st.session_state['logged_in'] = True
             st.session_state['user_email'] = login_email
-            # 判斷權限角色
             st.session_state['role'] = 'admin' if login_email == SUPER_ADMIN else 'user'
             st.success(f"✅ 登入成功！歡迎，您的權限級別為：{'超級管理員 👑' if st.session_state['role'] == 'admin' else '一般使用者 🚀'}")
             st.rerun()
         else:
-            st.error("❌ 查無授權。請聯絡系統管理員 (w184813740@hotmail.com) 為您開通。")
+            st.error("❌ 查無授權。請聯絡系統管理員為您開通。")
     st.stop()
 
 # ==========================================
-# 🚀 雙引擎與資料庫快取 (強化容錯與補救)
+# 🚀 雙引擎與資料庫快取
 # ==========================================
 def get_kline_data(code, market, days=180):
     try:
@@ -134,12 +138,11 @@ INFO_DICT = load_company_info()
 PE_DICT = load_pe_data()
 
 # ==========================================
-# 🚀 終端機介面 (依據角色動態顯示)
+# 🚀 終端機介面
 # ==========================================
 st.title("🏆 小資投本比 - 雙引擎量化終端機")
 st.caption(f"目前登入身份：{st.session_state['user_email']} ({'👑 管理員' if st.session_state['role'] == 'admin' else '👤 授權使用者'})")
 
-# 根據角色決定能看到的模組
 if st.session_state['role'] == 'admin':
     mode = st.sidebar.radio("切換系統模組", ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)", "💼 投資追蹤 (進出場管理)", "🔐 授權管理中心"])
 else:
@@ -152,7 +155,7 @@ if st.sidebar.button("🚪 登出系統"):
 st.sidebar.markdown("---")
 
 if mode in ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"]:
-    st.sidebar.subheader("🎛️️ 黃金實戰參數")
+    st.sidebar.subheader("🎛 黃金實戰參數")
     ui_min_it_ratio = st.sidebar.slider("投本比絕對下限 (%)", 0.0, 2.0, 0.15, 0.01)
     ui_bias_max = st.sidebar.slider("乖離率容忍上限 (%)", 3.0, 20.0, 12.0, 0.5)
     
@@ -165,14 +168,12 @@ if mode in ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"]
     ui_max_cap = st.sidebar.slider("股本上限 (億)", 10, 500, 200, 10)
 
 # ==========================================
-# 模組 1：🔐 授權管理中心 (僅管理員可見)
+# 模組 1：🔐 授權管理中心
 # ==========================================
 if mode == "🔐 授權管理中心":
     st.subheader("🔐 分享版使用者授權管理")
-    st.markdown("在此新增或刪除 E-mail。因雙方共用同一個 App，名單修改後，朋友立刻就能登入。")
     
     auth_list = get_auth_list()
-        
     col1, col2 = st.columns(2)
     with col1:
         new_email = st.text_input("輸入欲授權的 E-mail").strip().lower()
@@ -199,7 +200,6 @@ if mode == "🔐 授權管理中心":
 # 模組 2：📡 嚴選加權評分雷達
 # ==========================================
 elif mode == "📡 嚴選加權評分雷達":
-    # 只有管理員可以選擇 XQ 上傳
     if st.session_state['role'] == 'admin':
         data_source = st.radio("選擇數據引擎", ["☁️ 雙引擎直連雲端抓取", "⚡ XQ 檔案上傳 (管理員專屬)"], horizontal=True)
     else:
@@ -215,6 +215,7 @@ elif mode == "📡 嚴選加權評分雷達":
         with col2: chk_tpex = st.checkbox("掃描上櫃股票", True)
     
     if st.button("🚀 啟動嚴選評分", type="primary"):
+        st.session_state['debug_logs'] = []
         if data_source == "⚡ XQ 檔案上傳 (管理員專屬)":
             if uploaded_file is not None:
                 with st.spinner("⚡ 正在嚴格篩選並計算加權分數..."):
@@ -255,7 +256,9 @@ elif mode == "📡 嚴選加權評分雷達":
                             df_final = pd.DataFrame(survivors).rename(columns={'商品': '名稱', 'SMA(20日)': '20日月線價'}).sort_values('綜合得分', ascending=False)
                             st.session_state['radar_data'] = df_final[[c for c in ['代碼', '名稱', '綜合得分', '投本比(%)', 'BIAS(20日)', '本益比', '振幅(%)', 'K值', 'RSI(12日)'] if c in df_final.columns]]
                             st.session_state['radar_msg'] = f"🎉 嚴選完成！過濾後共存活 {len(df_final)} 檔標的："
-                        else: st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 條件過於嚴格，本次無標的存活。"
+                        else: 
+                            st.session_state['radar_data'] = pd.DataFrame()
+                            st.session_state['radar_msg'] = "⚠️ 條件過於嚴格，本次無標的存活。"
                     except Exception as e: st.error(f"⚠️ 解析錯誤：{e}")
             else: st.warning("⚠️ 請先上傳 CSV 檔案！")
         else:
@@ -282,7 +285,8 @@ elif mode == "📡 嚴選加權評分雷達":
                 debug_logs = []
                 
                 if not stock_list: 
-                    st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 雲端完全抓不到今日或近期的投信買賣超紀錄。"
+                    st.session_state['radar_data'] = pd.DataFrame()
+                    st.session_state['radar_msg'] = "⚠️ 雲端完全抓不到今日或近期的投信買賣超紀錄。"
                 else:
                     my_bar, results = st.progress(0, text=f"🚀 發現 {len(stock_list)} 檔標的，透過雙引擎高速解析中..."), []
                     for i, stock in enumerate(stock_list):
@@ -292,7 +296,6 @@ elif mode == "📡 嚴選加權評分雷達":
                             pe_ratio = PE_DICT.get(code, 0)
                             shares = INFO_DICT.get(code, {}).get('shares', 0)
                             
-                            # Yahoo 備援修復缺失的本益比與股本
                             if shares == 0 or pe_ratio == 0:
                                 try:
                                     tk = yf.Ticker(f"{code}{stock['market']}")
@@ -366,16 +369,19 @@ elif mode == "📡 嚴選加權評分雷達":
                     if results:
                         st.session_state['radar_data'] = pd.DataFrame(results).sort_values('綜合得分', ascending=False)
                         st.session_state['radar_msg'] = f"🎉 嚴選完成！雙引擎飆速過濾後，共存活 {len(st.session_state['radar_data'])} 檔菁英標的："
-                    else: st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 條件過於嚴格，本次無標的存活。"
+                    else: 
+                        st.session_state['radar_data'] = pd.DataFrame()
+                        st.session_state['radar_msg'] = "⚠️ 條件過於嚴格，本次無標的存活。"
 
-    if st.session_state['radar_data'] is not None:
+    # 💡 絕對防禦：利用 .get() 確保不會發生 KeyError
+    if st.session_state.get('radar_data') is not None:
         if not st.session_state['radar_data'].empty:
-            st.success(st.session_state['radar_msg'])
+            st.success(st.session_state.get('radar_msg', ''))
             st.dataframe(st.session_state['radar_data'], use_container_width=True, hide_index=True)
-        else: st.warning(st.session_state['radar_msg'])
+        else: 
+            st.warning(st.session_state.get('radar_msg', ''))
         
-        # 開發者透視眼僅管理員可見，避免朋友看到太多複雜資訊
-        if st.session_state['role'] == 'admin' and 'debug_logs' in st.session_state and st.session_state['debug_logs']:
+        if st.session_state.get('role') == 'admin' and st.session_state.get('debug_logs'):
             with st.expander("🛠️ 開發者透視眼 (點擊查看：每檔股票為何被淘汰？)"):
                 for log in st.session_state['debug_logs']: st.write(log)
 
@@ -420,7 +426,6 @@ elif mode == "🎯 個股健檢 (標的審查)":
                         
                     shares = INFO_DICT.get(stock_code, {}).get('shares', 0)
                     
-                    # 啟動備援修復
                     if shares == 0 or pe_ratio == 0:
                         try:
                             tk = yf.Ticker(f"{stock_code}{market}")
@@ -469,17 +474,13 @@ elif mode == "🎯 個股健檢 (標的審查)":
                     if pass_all: 
                         score = 55 + (25 if k_val > d_val and k_val <= 80 else 15 if k_val > d_val else 0) + (20 if rsi_val >= 50 else 0)
                         st.success(f"🎉 **診斷結果：強勢存活！** 綜合得分為 **{score} 分**！")
-                    else: st.error("⚠️ **診斷結果：淘汰。** 核心指標未達標準。")
+                    else: st.error("⚠️️ **診斷結果：淘汰。** 核心指標未達標準。")
             except Exception as e: st.error(f"健檢發生錯誤: {e}")
 
 # ==========================================
-# 模組 4：💼 投資追蹤 (進出場管理) - 僅管理員可見
+# 模組 4：💼 投資追蹤 (僅管理員)
 # ==========================================
-elif mode == "💼 投資追蹤 (進出場管理)" and st.session_state['role'] == 'admin':
-    if 'portfolio' not in st.session_state: 
-        if os.path.exists(PORTFOLIO_FILE): st.session_state['portfolio'] = pd.read_csv(PORTFOLIO_FILE)
-        else: st.session_state['portfolio'] = pd.DataFrame(columns=["股票", "買進日", "買進價", "股數", "停損價", "停利目標"])
-        
+elif mode == "💼 投資追蹤 (進出場管理)" and st.session_state.get('role') == 'admin':
     st.subheader("💼 我的量化投資組合")
     with st.expander("➕ 新增交易紀錄", expanded=False):
         with st.form("add_trade_form"):
