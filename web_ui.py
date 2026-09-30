@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import yfinance as yf
 import datetime
 import requests
 import warnings
@@ -14,7 +15,7 @@ ssl._create_default_https_context = ssl._create_unverified_context
 twse_session = requests.Session()
 twse_session.verify = False
 twse_session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Accept': 'application/json, text/javascript, */*; q=0.01',
 })
 
@@ -43,14 +44,14 @@ if not st.session_state['logged_in']:
     st.stop()
 
 # ==========================================
-# 🚀 核心資料快取區 (V55 鉅亨網 + OpenAPI 直連)
+# 🚀 雙引擎資料快取區 (鉅亨網 + Yahoo 備援 + OpenAPI)
 # ==========================================
-def get_cnyes_kline(code, days=120):
-    """自鉅亨網取得歷史 K 線，免 Key、免註冊、不擋海外 IP"""
+def get_kline_data(code, market, days=120):
+    """雙引擎 K 線抓取：優先使用鉅亨網，失敗則自動切換 Yahoo"""
+    # 引擎 1：鉅亨網 (高速、不擋 IP)
     try:
         end_ts = int(datetime.datetime.now().timestamp())
         start_ts = int((datetime.datetime.now() - datetime.timedelta(days=days)).timestamp())
-        # 鉅亨網 API，台股加上 TWS: 前綴
         url = f"https://ws.api.cnyes.com/ws/api/v1/charting/history?symbol=TWS:{code}:STOCK&resolution=D&quote=1&from={start_ts}&to={end_ts}"
         res = requests.get(url, timeout=5, verify=False)
         if res.status_code == 200:
@@ -64,18 +65,29 @@ def get_cnyes_kline(code, days=120):
                     'Close': data['c'],
                     'Volume': data['v']
                 })
-                # 簡單判定：若成交量數字很大(股數)，自動轉換為張數(千股)
                 if df['Volume'].mean() > 10000:
                     df['Volume'] = df['Volume'] / 1000
                 df.set_index('Date', inplace=True)
-                return df.dropna()
-    except Exception as e:
+                df = df.dropna()
+                if not df.empty and len(df) >= 20:
+                    return df, "鉅亨網"
+    except Exception:
         pass
-    return pd.DataFrame()
+        
+    # 引擎 2：Yahoo Finance 備援機制
+    try:
+        symbol = f"{code}{market}"
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="6mo")
+        if not df.empty and len(df) >= 20:
+            return df, "Yahoo"
+    except Exception:
+        pass
+
+    return pd.DataFrame(), "無資料"
 
 @st.cache_data(ttl=86400)
 def load_pe_data():
-    """直接從政府 OpenAPI 抓取全市場本益比"""
     pe_dict = {}
     try:
         res_twse = twse_session.get("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", verify=False, timeout=10)
@@ -102,7 +114,6 @@ def load_pe_data():
 
 @st.cache_data(ttl=86400)
 def load_company_info():
-    """抓取產業類別，並用政府公布的實收資本額精算發行股數"""
     info_dict = {}
     try:
         res_twse = twse_session.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", verify=False, timeout=15)
@@ -173,43 +184,13 @@ PORTFOLIO_FILE = "portfolio_data.csv"
 if 'radar_data' not in st.session_state: st.session_state['radar_data'] = None
 if 'radar_msg' not in st.session_state: st.session_state['radar_msg'] = ""
 if 'chat_history' not in st.session_state:
-    st.session_state['chat_history'] = [{"role": "assistant", "content": "您好！我是您的專屬量化助理。您可以問我基礎的指標名詞；若在左側輸入 Gemini API 金鑰，我將解鎖為全能 AI 顧問，隨時為您分析大盤與個股！"}]
+    st.session_state['chat_history'] = [{"role": "assistant", "content": "您好！我是您的專屬量化助理。您可以問我基礎的指標名詞；若在左側輸入 Gemini API 金鑰，我將解鎖為全能 AI 顧問！"}]
 
 if 'portfolio' not in st.session_state: 
     if os.path.exists(PORTFOLIO_FILE):
         st.session_state['portfolio'] = pd.read_csv(PORTFOLIO_FILE)
     else:
         st.session_state['portfolio'] = pd.DataFrame(columns=["股票", "買進日", "買進價", "股數", "停損價", "停利目標"])
-
-# 🌟 雙核心 AI 問答引擎
-def get_bot_answer(prompt, api_key=""):
-    def rule_based_answer(text):
-        if any(k in text for k in ['核心籌碼', '投本比', '籌碼']): return "**【核心籌碼 / 投本比】**\n指的是「投信買超張數佔公司發行股本的比例」。因為投信屬於主力法人，重金砸在中小型股時容易推升股價。系統要求投本比達標，就是確認這檔股票「有大人在照顧」。"
-        elif any(k in text for k in ['乖離率', 'bias', '位階']): return "**【乖離率 (BIAS)】**\n指的是「目前股價距離 20 日均線的百分比」。正乖離太大容易追高被套；負乖離太大代表弱勢破底。限制在 ±8% 內，是為了確保買在安全的起漲點。"
-        elif any(k in text for k in ['本益比', 'pe', '估值']): return "**【本益比 (PE Ratio)】**\n公式是「股價 ÷ 每股盈餘 (EPS)」。系統淘汰本益比過高的股票，是為了避免買到沒有基本面獲利支撐的「高空煙火股」。"
-        elif any(k in text for k in ['振幅', '牛皮', '死魚', '波動']): return "**【5日均振幅】**\n指的是「最近5天內，每天最高價與最低價的差距比例」。如果股票每天上下波動不到 1% (牛皮股)，扣掉手續費就沒肉吃。設定下限是為了確保股票夠活潑。"
-        elif any(k in text for k in ['kd', 'k值', 'd值']): return "**【KD 隨機指標】**\n判斷短線動能。K 值向上突破 D 值（黃金交叉）代表買盤強勁會加分；但若 K 值 > 80 進入超買區，系統會減少給分防禦追高風險。"
-        elif 'rsi' in text: return "**【RSI 相對強弱指標】**\n大於 50 代表近期買盤強過賣盤，股票處於「多方控盤」的強勢格局，系統會給予 20 分趨勢加分。"
-        elif any(k in text for k in ['淘汰', '為什麼淘汰']): return "**【為什麼會被淘汰？】**\n系統採用極度嚴格的雙殺機制。只要「投本比未達標」、「乖離率過高」、「本益比太貴」或「振幅太小」，只要踩中一個地雷，不管技術面多漂亮都會被無情淘汰。"
-        else: return "這個問題很專業！不過我目前只載入了基礎記憶。如果您想讓我回答任意問題或分析個股，請在左側側邊欄輸入您的 Gemini API Key 喔！"
-
-    if api_key:
-        clean_key = api_key.strip()
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={clean_key}"
-            sys_prompt = "你是一位精通台股、量化交易與程式碼的頂級交易助理。請用簡潔、專業且帶有一點實戰幽默的口吻，回答用戶的問題。用戶提問："
-            payload = {"contents": [{"parts": [{"text": sys_prompt + prompt}]}]}
-            
-            res = requests.post(url, headers={'Content-Type': 'application/json'}, json=payload, timeout=15, verify=False)
-            
-            if res.status_code == 200:
-                return res.json()['candidates'][0]['content']['parts'][0]['text']
-            else:
-                return f"⚠️ 連結外星大腦失敗 (代碼: {res.status_code})。\n\n**Google 伺服器拒絕原因：**\n`{res.text}`\n\n切換為本地內建記憶：\n\n" + rule_based_answer(prompt.lower())
-        except Exception as e:
-            return f"⚠️ AI 腦神經連線異常 ({str(e)})，切換為本地內建記憶：\n\n" + rule_based_answer(prompt.lower())
-    else:
-        return rule_based_answer(prompt.lower())
 
 # --- 側邊欄：系統模式 ---
 mode = st.sidebar.radio("切換系統模組", [
@@ -221,17 +202,19 @@ mode = st.sidebar.radio("切換系統模組", [
 st.sidebar.markdown("---")
 
 st.sidebar.subheader("🧠 AI 大腦連線設定")
-ui_gemini_key = st.sidebar.text_input("🔑 輸入 Gemini API Key (選填)", type="password", help="填入後，健檢底部的問答小助理將升級為無所不知的全能 AI 顧問！")
+ui_gemini_key = st.sidebar.text_input("🔑 輸入 Gemini API Key (選填)", type="password", help="填入後解鎖全能 AI 顧問")
 st.sidebar.markdown("---")
 
 if mode in ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"]:
     st.sidebar.subheader("🎛️ 嚴格核心過濾門檻")
-    ui_min_it_ratio = st.sidebar.slider("投本比絕對下限 (%)", 0.1, 2.0, 0.4, 0.1, help="未達此標準直接剔除")
+    # 🔓 解放極限：下限降至 0.0，包容微量買超
+    ui_min_it_ratio = st.sidebar.slider("投本比絕對下限 (%)", 0.0, 2.0, 0.1, 0.01, help="未達此標準直接剔除")
     ui_bias_max = st.sidebar.slider("乖離率容忍上限 (%)", 3.0, 15.0, 8.0, 0.5, help="超出此區間直接剔除")
     
     st.sidebar.markdown("---")
     st.sidebar.subheader("🛡️ 估值與波動度防禦")
-    ui_max_pe = st.sidebar.slider("本益比上限 (倍)", 5.0, 60.0, 20.0, 1.0, help="防禦估值過高飆股")
+    # 🔓 解放極限：上限拉至 500，包容高本益比強勢股
+    ui_max_pe = st.sidebar.slider("本益比上限 (倍)", 5.0, 500.0, 60.0, 1.0, help="防禦估值過高飆股")
     ui_min_amplitude = st.sidebar.slider("5日均振幅下限 (%)", 1.0, 10.0, 3.5, 0.5, help="剔除股性死魚的標的")
     
     st.sidebar.markdown("---")
@@ -239,7 +222,7 @@ if mode in ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"]
     ui_min_vol = st.sidebar.slider("5日均量下限 (張)", 100, 5000, 800, 100)
     ui_max_cap = st.sidebar.slider("股本上限 (億)", 10, 500, 200, 10)
 
-elif mode == "⏱️️ 個股時光機 (歷史回測)":
+elif mode == "⏱️ 個股時光機 (歷史回測)":
     st.sidebar.header("🎛️ 回測紀律設定")
     ui_capital = st.sidebar.number_input("初始本金 (元)", value=20000, step=5000)
     ui_tp = st.sidebar.number_input("啟動防守獲利門檻 (元)", value=5000, step=1000)
@@ -251,7 +234,7 @@ elif mode == "⏱️️ 個股時光機 (歷史回測)":
 # ==========================================
 if mode == "📡 嚴選加權評分雷達":
     st.subheader("📡 全市場飆股 - 嚴格過濾與綜合評分排序")
-    data_source = st.radio("選擇數據引擎", ["⚡ XQ 檔案上傳 (極速)", "☁️ 鉅亨網直連雲端抓取 (智慧回溯)"], horizontal=True)
+    data_source = st.radio("選擇數據引擎", ["⚡ XQ 檔案上傳 (極速)", "☁️ 雙引擎直連雲端抓取 (智慧回溯)"], horizontal=True)
     uploaded_file = None
     if data_source == "⚡ XQ 檔案上傳 (極速)":
         uploaded_file = st.file_uploader("📂 請上傳 XQ 匯出的 CSV 檔 (需包含最高、最低、本益比)", type=['csv'])
@@ -304,7 +287,7 @@ if mode == "📡 嚴選加權評分雷達":
                     except Exception as e: st.error(f"⚠️ 解析錯誤：{e}")
             else: st.warning("⚠️ 請先上傳 CSV 檔案！")
         else:
-            with st.spinner("☁️ 正在連線政府資料庫與鉅亨網運算 (強勢免封鎖版)..."):
+            with st.spinner("☁️ 正在連線政府資料庫與雙引擎運算 (完美備援版)..."):
                 stock_list, target_date = [], datetime.datetime.now()
                 for _ in range(7):
                     try:
@@ -329,14 +312,14 @@ if mode == "📡 嚴選加權評分雷達":
                 if not stock_list: 
                     st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 雲端完全抓不到今日或近期的投信買賣超紀錄。"
                 else:
-                    my_bar, results = st.progress(0, text=f"🚀 發現 {len(stock_list)} 檔標的，透過鉅亨網高速解析中..."), []
+                    my_bar, results = st.progress(0, text=f"🚀 發現 {len(stock_list)} 檔標的，透過雙引擎高速解析中..."), []
                     
                     for i, stock in enumerate(stock_list):
                         my_bar.progress((i + 1) / len(stock_list), text=f"🧮 正在檢查 {stock['code']} ({i+1}/{len(stock_list)}) ...")
                         code = stock['code']
                         
                         try:
-                            # 🛡️ 1. 政府 OpenAPI 直連，取得本益比與股本
+                            # 1. 政府 OpenAPI 取得本益比與股本
                             pe_ratio = PE_DICT.get(code, 0)
                             if pe_ratio > ui_max_pe and pe_ratio != 0:
                                 debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：本益比過高 ({pe_ratio} > {ui_max_pe})")
@@ -353,13 +336,13 @@ if mode == "📡 嚴選加權評分雷達":
                                     debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：股本過大")
                                     continue
                             else:
-                                it_ratio = 99.9  # 免死金牌放行
+                                it_ratio = 99.9
                                 
-                            # 🛡️ 2. 向鉅亨網取得 K 線資料 (完全取代 yfinance)
-                            stock_df = get_cnyes_kline(code, days=90)
+                            # 2. 雙引擎 K 線抓取
+                            stock_df, source_name = get_kline_data(code, stock['market'], days=90)
                             
-                            if stock_df.empty or len(stock_df) < 20 or float(stock_df['Close'].iloc[-1]) < 10.0:
-                                debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：鉅亨網無K線或低於10元")
+                            if stock_df.empty:
+                                debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：雙引擎皆無法取得 K 線資料")
                                 continue
                                 
                             stock_close = stock_df['Close']
@@ -405,9 +388,9 @@ if mode == "📡 嚴選加權評分雷達":
                                 '5日均振幅(%)': avg_amp, 
                                 'BIAS(20日)': bias, 
                                 'K值': k_val, 
-                                'RSI(12日)': rsi_val
+                                '引擎': source_name
                             })
-                            debug_logs.append(f"{code} {stock['name']} ✅ 成功過關存活！")
+                            debug_logs.append(f"{code} {stock['name']} ✅ 成功過關存活！(來源: {source_name})")
                         except Exception as e: 
                             debug_logs.append(f"{code} {stock['name']} ⚠️ 發生程式錯誤：{e}")
                             continue 
@@ -417,7 +400,7 @@ if mode == "📡 嚴選加權評分雷達":
                     
                     if results:
                         st.session_state['radar_data'] = pd.DataFrame(results).sort_values('綜合得分', ascending=False)
-                        st.session_state['radar_msg'] = f"🎉 嚴選完成！鉅亨網飆速過濾後，共存活 {len(st.session_state['radar_data'])} 檔菁英標的："
+                        st.session_state['radar_msg'] = f"🎉 嚴選完成！雙引擎飆速過濾後，共存活 {len(st.session_state['radar_data'])} 檔菁英標的："
                     else: 
                         st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 條件過於嚴格，本次無標的存活。"
 
@@ -445,11 +428,11 @@ elif mode == "🎯 個股健檢 (標的審查)":
         stock_code = check_stock.split(" ")[0]
         market = ".TW" if "(上市)" in check_stock else ".TWO"
         
-        with st.spinner(f"正在為 {check_stock} 進行基本面與鉅亨網技術面掃描..."):
+        with st.spinner(f"正在為 {check_stock} 進行雙引擎基本面與技術面掃描..."):
             try:
-                hist = get_cnyes_kline(stock_code, days=90)
+                hist, source_name = get_kline_data(stock_code, market, days=90)
                 
-                if hist.empty: st.error("⚠️ 鉅亨網無法取得歷史資料。請確認網路或稍後再試。")
+                if hist.empty: st.error("⚠️ 雙引擎皆無法取得歷史資料。請確認網路或稍後再試。")
                 else:
                     close = round(float(hist['Close'].iloc[-1]), 2)
                     ma20 = hist['Close'].rolling(window=20).mean()
@@ -484,7 +467,7 @@ elif mode == "🎯 個股健檢 (標的審查)":
                     shares = INFO_DICT.get(stock_code, {}).get('shares', 0)
                     real_it_ratio = round(((it_buy * 2.5) / shares) * 100, 2) if shares > 0 and it_buy > 0 else 0.0
                     
-                    st.markdown(f"### 📊 【{check_stock}】 目前現價: {close} 元")
+                    st.markdown(f"### 📊 【{check_stock}】 目前現價: {close} 元 (資料源: {source_name})")
                     
                     with st.expander("📖 公司基本面與業務簡介", expanded=True):
                         comp_info = INFO_DICT.get(stock_code, {})
@@ -528,27 +511,6 @@ elif mode == "🎯 個股健檢 (標的審查)":
                     else: st.error("⚠️ **診斷結果：淘汰。** 核心籌碼、位階、估值或振幅未達標準。")
             except Exception as e: st.error(f"健檢過程發生錯誤: {e}")
 
-    # 🤖 雙核心聊天機器人 UI 區塊
-    st.markdown("---")
-    st.subheader("🤖 AI 健檢問答助理")
-    if ui_gemini_key:
-        st.caption("🟢 已連線 Gemini 大腦！您可以問我任何關於台股、技術分析或財報的問題。")
-    else:
-        st.caption("🟡 目前使用本地字典。想要更聰明的回答？請在左側輸入您的 Gemini API Key！")
-    
-    for msg in st.session_state['chat_history']:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            
-    if prompt := st.chat_input("想了解什麼指標或是個股呢？交給我吧！"):
-        st.session_state['chat_history'].append({"role": "user", "content": prompt})
-        with st.chat_message("user"): st.markdown(prompt)
-        
-        answer = get_bot_answer(prompt, ui_gemini_key)
-        
-        st.session_state['chat_history'].append({"role": "assistant", "content": answer})
-        with st.chat_message("assistant"): st.markdown(answer)
-
 # ==========================================
 # 模組 3：個股時光機 (歷史回測)
 # ==========================================
@@ -561,10 +523,12 @@ elif mode == "⏱️ 個股時光機 (歷史回測)":
 
     if st.button("🚀 啟動回測", type="primary"):
         stock_code = selected_stock.split(" ")[0]
-        with st.spinner("正在自鉅亨網下載資料並回測..."):
+        market = ".TW" if "(上市)" in selected_stock else ".TWO"
+        
+        with st.spinner("正在自雙引擎下載資料並回測..."):
             try:
-                hist = get_cnyes_kline(stock_code, days=400) # 取超過一年資料以供足夠均線計算
-                if hist.empty: st.error("⚠️ 抓不到資料！")
+                hist, source_name = get_kline_data(stock_code, market, days=400) 
+                if hist.empty: st.error("⚠️ 雙引擎皆抓不到資料！")
                 else:
                     hist['MA20'] = hist['Close'].rolling(20).mean()
                     hist['BIAS20'] = ((hist['Close'] - hist['MA20']) / hist['MA20']) * 100
@@ -615,7 +579,7 @@ elif mode == "⏱️ 個股時光機 (歷史回測)":
                     if trade_history:
                         df_report = pd.DataFrame(trade_history)
                         net_profit = current_capital - ui_capital
-                        st.success(f"📊 總損益: {round(net_profit):,} 元 | 總報酬率: {(net_profit / ui_capital) * 100:.2f}%")
+                        st.success(f"📊 總損益: {round(net_profit):,} 元 | 總報酬率: {(net_profit / ui_capital) * 100:.2f}% (資料源: {source_name})")
                         st.dataframe(df_report, use_container_width=True)
                     else: st.warning("未觸發任何進場條件。")
             except Exception as e: st.error(f"發生錯誤：{e}")
@@ -625,7 +589,6 @@ elif mode == "⏱️ 個股時光機 (歷史回測)":
 # ==========================================
 elif mode == "💼 投資追蹤 (進出場管理)":
     st.subheader("💼 我的量化投資組合")
-    st.markdown("在此紀錄您跟隨系統買進的標的，系統將自動為您連線計算最新獲利狀態。")
     
     with st.expander("➕ 新增交易紀錄", expanded=False):
         with st.form("add_trade_form"):
@@ -643,19 +606,19 @@ elif mode == "💼 投資追蹤 (進出場管理)":
                 new_trade = {"股票": t_stock, "買進日": t_date.strftime("%Y-%m-%d"), "買進價": t_price, "股數": t_shares, "停損價": t_sl, "停利目標": t_tp}
                 st.session_state['portfolio'] = pd.concat([st.session_state['portfolio'], pd.DataFrame([new_trade])], ignore_index=True)
                 st.session_state['portfolio'].to_csv(PORTFOLIO_FILE, index=False, encoding='utf-8-sig')
-                
                 st.success(f"✅ 成功將 {t_stock} 登錄至投資組合！已自動存檔。")
                 st.rerun()
 
     if not st.session_state['portfolio'].empty:
         st.markdown("### 📊 庫存部位監控")
         df_p = st.session_state['portfolio'].copy()
-        with st.spinner("🔄 正在連線鉅亨網取得最新報價..."):
+        with st.spinner("🔄 正在連線雙引擎取得最新報價..."):
             live_prices = []
             for idx, row in df_p.iterrows():
                 try:
                     stock_code = row['股票'].split(" ")[0]
-                    hist = get_cnyes_kline(stock_code, days=10)
+                    market = ".TW" if "(上市)" in row['股票'] else ".TWO"
+                    hist, _ = get_kline_data(stock_code, market, days=10)
                     live_prices.append(round(float(hist['Close'].iloc[-1]), 2) if not hist.empty else row['買進價'])
                 except: live_prices.append(row['買進價'])
             
