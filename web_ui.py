@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf
 import datetime
 import requests
 import warnings
@@ -8,7 +7,7 @@ import ssl
 import urllib3
 import os
 
-# --- 破解 SSL 防火牆與限流設定 (僅供台股與 Gemini 專用) ---
+# --- 破解 SSL 防火牆與限流設定 (政府 OpenAPI 與鉅亨網專用) ---
 warnings.filterwarnings('ignore')
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -17,7 +16,6 @@ twse_session.verify = False
 twse_session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/javascript, */*; q=0.01',
-    'X-Requested-With': 'XMLHttpRequest'
 })
 
 # --- 網頁介面設定 ---
@@ -45,11 +43,39 @@ if not st.session_state['logged_in']:
     st.stop()
 
 # ==========================================
-# 🚀 核心資料快取區 (V54 OpenAPI 直連)
+# 🚀 核心資料快取區 (V55 鉅亨網 + OpenAPI 直連)
 # ==========================================
+def get_cnyes_kline(code, days=120):
+    """自鉅亨網取得歷史 K 線，免 Key、免註冊、不擋海外 IP"""
+    try:
+        end_ts = int(datetime.datetime.now().timestamp())
+        start_ts = int((datetime.datetime.now() - datetime.timedelta(days=days)).timestamp())
+        # 鉅亨網 API，台股加上 TWS: 前綴
+        url = f"https://ws.api.cnyes.com/ws/api/v1/charting/history?symbol=TWS:{code}:STOCK&resolution=D&quote=1&from={start_ts}&to={end_ts}"
+        res = requests.get(url, timeout=5, verify=False)
+        if res.status_code == 200:
+            data = res.json().get('data', {})
+            if data and 't' in data:
+                df = pd.DataFrame({
+                    'Date': pd.to_datetime(data['t'], unit='s'),
+                    'Open': data['o'],
+                    'High': data['h'],
+                    'Low': data['l'],
+                    'Close': data['c'],
+                    'Volume': data['v']
+                })
+                # 簡單判定：若成交量數字很大(股數)，自動轉換為張數(千股)
+                if df['Volume'].mean() > 10000:
+                    df['Volume'] = df['Volume'] / 1000
+                df.set_index('Date', inplace=True)
+                return df.dropna()
+    except Exception as e:
+        pass
+    return pd.DataFrame()
+
 @st.cache_data(ttl=86400)
 def load_pe_data():
-    """直接從政府 OpenAPI 抓取全市場本益比，拒絕依賴 Yahoo"""
+    """直接從政府 OpenAPI 抓取全市場本益比"""
     pe_dict = {}
     try:
         res_twse = twse_session.get("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", verify=False, timeout=10)
@@ -185,16 +211,6 @@ def get_bot_answer(prompt, api_key=""):
     else:
         return rule_based_answer(prompt.lower())
 
-def translate_to_zh(text):
-    if not text or text in ['未知', '官方暫無資料，請參考證交所公開資訊觀測站。']: return text
-    try:
-        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW&dt=t&q={requests.utils.quote(text)}"
-        res = twse_session.get(url, timeout=5)
-        if res.status_code == 200:
-            return "".join([sentence[0] for sentence in res.json()[0] if sentence[0]])
-    except: pass
-    return text 
-
 # --- 側邊欄：系統模式 ---
 mode = st.sidebar.radio("切換系統模組", [
     "📡 嚴選加權評分雷達", 
@@ -223,7 +239,7 @@ if mode in ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"]
     ui_min_vol = st.sidebar.slider("5日均量下限 (張)", 100, 5000, 800, 100)
     ui_max_cap = st.sidebar.slider("股本上限 (億)", 10, 500, 200, 10)
 
-elif mode == "⏱️ 個股時光機 (歷史回測)":
+elif mode == "⏱️️ 個股時光機 (歷史回測)":
     st.sidebar.header("🎛️ 回測紀律設定")
     ui_capital = st.sidebar.number_input("初始本金 (元)", value=20000, step=5000)
     ui_tp = st.sidebar.number_input("啟動防守獲利門檻 (元)", value=5000, step=1000)
@@ -235,7 +251,7 @@ elif mode == "⏱️ 個股時光機 (歷史回測)":
 # ==========================================
 if mode == "📡 嚴選加權評分雷達":
     st.subheader("📡 全市場飆股 - 嚴格過濾與綜合評分排序")
-    data_source = st.radio("選擇數據引擎", ["⚡ XQ 檔案上傳 (極速)", "☁️ TWSE 雲端抓取 (智慧回溯)"], horizontal=True)
+    data_source = st.radio("選擇數據引擎", ["⚡ XQ 檔案上傳 (極速)", "☁️ 鉅亨網直連雲端抓取 (智慧回溯)"], horizontal=True)
     uploaded_file = None
     if data_source == "⚡ XQ 檔案上傳 (極速)":
         uploaded_file = st.file_uploader("📂 請上傳 XQ 匯出的 CSV 檔 (需包含最高、最低、本益比)", type=['csv'])
@@ -288,7 +304,7 @@ if mode == "📡 嚴選加權評分雷達":
                     except Exception as e: st.error(f"⚠️ 解析錯誤：{e}")
             else: st.warning("⚠️ 請先上傳 CSV 檔案！")
         else:
-            with st.spinner("☁️ 正在連線政府資料庫與批次運算 (免封鎖極速版)..."):
+            with st.spinner("☁️ 正在連線政府資料庫與鉅亨網運算 (強勢免封鎖版)..."):
                 stock_list, target_date = [], datetime.datetime.now()
                 for _ in range(7):
                     try:
@@ -313,116 +329,95 @@ if mode == "📡 嚴選加權評分雷達":
                 if not stock_list: 
                     st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 雲端完全抓不到今日或近期的投信買賣超紀錄。"
                 else:
-                    ticker_symbols = [f"{stock['code']}{stock['market']}" for stock in stock_list]
-                    my_bar = st.progress(0, text=f"🚀 向 Yahoo 批次發送 {len(ticker_symbols)} 檔請求中...")
+                    my_bar, results = st.progress(0, text=f"🚀 發現 {len(stock_list)} 檔標的，透過鉅亨網高速解析中..."), []
                     
-                    try:
-                        # 🛡️ 核心大升級：改用 yf.download 批次下載，突破 100 次的頻率封鎖網！
-                        hist_data = yf.download(ticker_symbols, period="3mo", group_by='ticker', progress=False)
-                    except Exception as e:
-                        debug_logs.append(f"⚠️ 批次下載異常: {e}")
-                        hist_data = pd.DataFrame()
+                    for i, stock in enumerate(stock_list):
+                        my_bar.progress((i + 1) / len(stock_list), text=f"🧮 正在檢查 {stock['code']} ({i+1}/{len(stock_list)}) ...")
+                        code = stock['code']
                         
-                    results = []
-                    
-                    if not hist_data.empty:
-                        for i, stock in enumerate(stock_list):
-                            my_bar.progress((i + 1) / len(stock_list), text="🧮 對接 OpenAPI 計算基本面與技術指標...")
-                            code = stock['code']
-                            symbol = f"{code}{stock['market']}"
+                        try:
+                            # 🛡️ 1. 政府 OpenAPI 直連，取得本益比與股本
+                            pe_ratio = PE_DICT.get(code, 0)
+                            if pe_ratio > ui_max_pe and pe_ratio != 0:
+                                debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：本益比過高 ({pe_ratio} > {ui_max_pe})")
+                                continue
                             
-                            try:
-                                # 🛡️ 政府 OpenAPI 直連，永遠抓得到本益比跟股本
-                                pe_ratio = PE_DICT.get(code, 0)
-                                if pe_ratio > ui_max_pe and pe_ratio != 0:
-                                    debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：本益比過高 ({pe_ratio} > {ui_max_pe})")
+                            shares = INFO_DICT.get(code, {}).get('shares', 0)
+                            it_ratio = 0.0
+                            if shares > 0:
+                                it_ratio = round(((stock['it_buy'] * 2.5) / shares) * 100, 2)
+                                if it_ratio < ui_min_it_ratio:
+                                    debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：投本比未達標 ({it_ratio}%)")
                                     continue
-                                
-                                shares = INFO_DICT.get(code, {}).get('shares', 0)
-                                it_ratio = 0.0
-                                if shares > 0:
-                                    it_ratio = round(((stock['it_buy'] * 2.5) / shares) * 100, 2)
-                                    if it_ratio < ui_min_it_ratio:
-                                        debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：投本比未達標 ({it_ratio}%)")
-                                        continue
-                                    if round(shares / 10000000, 2) > ui_max_cap:
-                                        debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：股本過大")
-                                        continue
-                                else:
-                                    it_ratio = 99.9  # 免死金牌放行
-                                    
-                                # 從批次資料庫中提款 K 線
-                                if isinstance(hist_data.columns, pd.MultiIndex):
-                                    if symbol not in hist_data.columns.get_level_values(0):
-                                        debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：Yahoo 無提供 K 線")
-                                        continue
-                                    stock_df = hist_data[symbol]
-                                else:
-                                    stock_df = hist_data
-                                    
-                                if 'Close' not in stock_df.columns:
+                                if round(shares / 10000000, 2) > ui_max_cap:
+                                    debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：股本過大")
                                     continue
-                                    
-                                stock_close = pd.to_numeric(stock_df['Close'], errors='coerce').dropna()
-                                stock_high = pd.to_numeric(stock_df['High'], errors='coerce').dropna()
-                                stock_low = pd.to_numeric(stock_df['Low'], errors='coerce').dropna()
-                                stock_vol = pd.to_numeric(stock_df['Volume'], errors='coerce').dropna()
+                            else:
+                                it_ratio = 99.9  # 免死金牌放行
                                 
-                                if len(stock_close) < 20 or float(stock_close.iloc[-1]) < 10.0:
-                                    debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：上市未滿20天或低於10元")
-                                    continue
+                            # 🛡️ 2. 向鉅亨網取得 K 線資料 (完全取代 yfinance)
+                            stock_df = get_cnyes_kline(code, days=90)
+                            
+                            if stock_df.empty or len(stock_df) < 20 or float(stock_df['Close'].iloc[-1]) < 10.0:
+                                debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：鉅亨網無K線或低於10元")
+                                continue
                                 
-                                current_vol = float(stock_vol.tail(5).mean()) / 1000
-                                if current_vol < ui_min_vol:
-                                    debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：均量低於 {ui_min_vol} 千張")
-                                    continue
-                                
-                                avg_amp = round((((stock_high - stock_low) / stock_close.shift(1)) * 100).tail(5).mean(), 2)
-                                if avg_amp < ui_min_amplitude:
-                                    debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：5日振幅太小 ({avg_amp}%)")
-                                    continue 
-                                
-                                ma20 = stock_close.rolling(20).mean().iloc[-1]
-                                bias = round(((float(stock_close.iloc[-1]) - float(ma20)) / float(ma20)) * 100, 2)
-                                if not (-ui_bias_max <= bias <= ui_bias_max):
-                                    debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：乖離率超標 ({bias}%)")
-                                    continue
-                                
-                                score = 55
-                                low9, high9 = stock_low.rolling(9).min(), stock_high.rolling(9).max()
-                                k_series = ((stock_close - low9) / (high9 - low9) * 100).ewm(alpha=1/3, adjust=False).mean()
-                                d_series = k_series.ewm(alpha=1/3, adjust=False).mean()
-                                k_val, d_val = round(k_series.iloc[-1], 2), round(d_series.iloc[-1], 2)
-                                if k_val > d_val and k_val <= 80: score += 25
-                                elif k_val > d_val: score += 15
-                                
-                                delta = stock_close.diff()
-                                rsi_series = 100 - (100 / (1 + (delta.clip(lower=0).ewm(alpha=1/12, adjust=False).mean() / -delta.clip(upper=0).ewm(alpha=1/12, adjust=False).mean())))
-                                rsi_val = round(rsi_series.iloc[-1], 2)
-                                if rsi_val >= 50: score += 20
-                                
-                                results.append({
-                                    '代碼': stock['code'], 
-                                    '名稱': stock['name'], 
-                                    '綜合得分': score, 
-                                    '投本比(%)': it_ratio if it_ratio != 99.9 else 'N/A', 
-                                    '本益比': round(pe_ratio, 2) if pe_ratio > 0 else 'N/A', 
-                                    '5日均振幅(%)': avg_amp, 
-                                    'BIAS(20日)': bias, 
-                                    'K值': k_val, 
-                                    'RSI(12日)': rsi_val
-                                })
-                                debug_logs.append(f"{code} {stock['name']} ✅ 成功過關存活！")
-                            except Exception as e: 
-                                debug_logs.append(f"{code} {stock['name']} ⚠️ 發生程式錯誤：{e}")
+                            stock_close = stock_df['Close']
+                            stock_high = stock_df['High']
+                            stock_low = stock_df['Low']
+                            stock_vol = stock_df['Volume']
+                            
+                            current_vol = float(stock_vol.tail(5).mean())
+                            if current_vol < ui_min_vol:
+                                debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：均量低於 {ui_min_vol} 千張 (目前: {round(current_vol)} 張)")
+                                continue
+                            
+                            avg_amp = round((((stock_high - stock_low) / stock_close.shift(1)) * 100).tail(5).mean(), 2)
+                            if avg_amp < ui_min_amplitude:
+                                debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：5日振幅太小 ({avg_amp}%)")
                                 continue 
+                            
+                            ma20 = stock_close.rolling(20).mean().iloc[-1]
+                            bias = round(((float(stock_close.iloc[-1]) - float(ma20)) / float(ma20)) * 100, 2)
+                            if not (-ui_bias_max <= bias <= ui_bias_max):
+                                debug_logs.append(f"{code} {stock['name']} ❌ 遭淘汰：乖離率超標 ({bias}%)")
+                                continue
+                            
+                            score = 55
+                            low9, high9 = stock_low.rolling(9).min(), stock_high.rolling(9).max()
+                            k_series = ((stock_close - low9) / (high9 - low9) * 100).ewm(alpha=1/3, adjust=False).mean()
+                            d_series = k_series.ewm(alpha=1/3, adjust=False).mean()
+                            k_val, d_val = round(k_series.iloc[-1], 2), round(d_series.iloc[-1], 2)
+                            if k_val > d_val and k_val <= 80: score += 25
+                            elif k_val > d_val: score += 15
+                            
+                            delta = stock_close.diff()
+                            rsi_series = 100 - (100 / (1 + (delta.clip(lower=0).ewm(alpha=1/12, adjust=False).mean() / -delta.clip(upper=0).ewm(alpha=1/12, adjust=False).mean())))
+                            rsi_val = round(rsi_series.iloc[-1], 2)
+                            if rsi_val >= 50: score += 20
+                            
+                            results.append({
+                                '代碼': stock['code'], 
+                                '名稱': stock['name'], 
+                                '綜合得分': score, 
+                                '投本比(%)': it_ratio if it_ratio != 99.9 else 'N/A', 
+                                '本益比': round(pe_ratio, 2) if pe_ratio > 0 else 'N/A', 
+                                '5日均振幅(%)': avg_amp, 
+                                'BIAS(20日)': bias, 
+                                'K值': k_val, 
+                                'RSI(12日)': rsi_val
+                            })
+                            debug_logs.append(f"{code} {stock['name']} ✅ 成功過關存活！")
+                        except Exception as e: 
+                            debug_logs.append(f"{code} {stock['name']} ⚠️ 發生程式錯誤：{e}")
+                            continue 
                             
                     my_bar.empty()
                     st.session_state['debug_logs'] = debug_logs
                     
                     if results:
                         st.session_state['radar_data'] = pd.DataFrame(results).sort_values('綜合得分', ascending=False)
-                        st.session_state['radar_msg'] = f"🎉 嚴選完成！排除弱勢股後，共存活 {len(st.session_state['radar_data'])} 檔菁英標的："
+                        st.session_state['radar_msg'] = f"🎉 嚴選完成！鉅亨網飆速過濾後，共存活 {len(st.session_state['radar_data'])} 檔菁英標的："
                     else: 
                         st.session_state['radar_data'], st.session_state['radar_msg'] = pd.DataFrame(), "⚠️ 條件過於嚴格，本次無標的存活。"
 
@@ -447,19 +442,18 @@ elif mode == "🎯 個股健檢 (標的審查)":
     check_stock = st.selectbox("請選擇要健檢的標的", options=list(STOCK_DICT.keys()))
     
     if st.button("🩺 開始健檢", type="primary"):
-        yahoo_ticker = STOCK_DICT[check_stock]
         stock_code = check_stock.split(" ")[0]
         market = ".TW" if "(上市)" in check_stock else ".TWO"
         
-        with st.spinner(f"正在為 {check_stock} 進行基本面與技術面掃描..."):
+        with st.spinner(f"正在為 {check_stock} 進行基本面與鉅亨網技術面掃描..."):
             try:
-                hist = yf.Ticker(yahoo_ticker).history(period="3mo")
+                hist = get_cnyes_kline(stock_code, days=90)
                 
-                if hist.empty: st.error("⚠️️ 無法取得歷史資料。請確認網路或稍後再試。")
+                if hist.empty: st.error("⚠️ 鉅亨網無法取得歷史資料。請確認網路或稍後再試。")
                 else:
-                    close = round(hist['Close'].iloc[-1], 2)
+                    close = round(float(hist['Close'].iloc[-1]), 2)
                     ma20 = hist['Close'].rolling(window=20).mean()
-                    bias = round(((hist['Close'] - ma20) / ma20).iloc[-1] * 100, 2)
+                    bias = round(((float(hist['Close'].iloc[-1]) - ma20.iloc[-1]) / ma20.iloc[-1]) * 100, 2)
                     
                     pe_ratio = PE_DICT.get(stock_code, 0)
                     
@@ -566,10 +560,10 @@ elif mode == "⏱️ 個股時光機 (歷史回測)":
     with col_end: end_date = st.date_input("結束日", datetime.date.today())
 
     if st.button("🚀 啟動回測", type="primary"):
-        yahoo_ticker = STOCK_DICT[selected_stock]
-        with st.spinner("正在下載資料並回測..."):
+        stock_code = selected_stock.split(" ")[0]
+        with st.spinner("正在自鉅亨網下載資料並回測..."):
             try:
-                hist = yf.Ticker(yahoo_ticker).history(period="1y") 
+                hist = get_cnyes_kline(stock_code, days=400) # 取超過一年資料以供足夠均線計算
                 if hist.empty: st.error("⚠️ 抓不到資料！")
                 else:
                     hist['MA20'] = hist['Close'].rolling(20).mean()
@@ -589,7 +583,10 @@ elif mode == "⏱️ 個股時光機 (歷史回測)":
                         if pd.isna(row['MA20']) or pd.isna(row['K']): continue
                         high, low, close = row['High'], row['Low'], row['Close']
                         if not is_holding:
-                            prev_row = hist.loc[:date_str].iloc[-2]
+                            try:
+                                prev_row = hist.loc[:date_str].iloc[-2]
+                            except: continue
+                            
                             if (row['K'] > row['D'] and prev_row['K'] <= prev_row['D']) and (-8 <= row['BIAS20'] <= 8):
                                 shares = int(current_capital // close)
                                 if shares > 0:
@@ -653,12 +650,13 @@ elif mode == "💼 投資追蹤 (進出場管理)":
     if not st.session_state['portfolio'].empty:
         st.markdown("### 📊 庫存部位監控")
         df_p = st.session_state['portfolio'].copy()
-        with st.spinner("🔄 正在連線交易所取得最新報價..."):
+        with st.spinner("🔄 正在連線鉅亨網取得最新報價..."):
             live_prices = []
             for idx, row in df_p.iterrows():
                 try:
-                    hist = yf.Ticker(STOCK_DICT.get(row['股票'], "2330.TW")).history(period="5d")
-                    live_prices.append(round(hist['Close'].iloc[-1], 2) if not hist.empty else row['買進價'])
+                    stock_code = row['股票'].split(" ")[0]
+                    hist = get_cnyes_kline(stock_code, days=10)
+                    live_prices.append(round(float(hist['Close'].iloc[-1]), 2) if not hist.empty else row['買進價'])
                 except: live_prices.append(row['買進價'])
             
             df_p['最新現價'] = live_prices
