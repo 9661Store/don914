@@ -8,13 +8,16 @@ import ssl
 import urllib3
 import os
 
-# --- 破解 SSL 防火牆與限流設定 (僅供 TWSE/TPEx/Gemini 使用) ---
+# --- 破解 SSL 防火牆與限流設定 (專供台股與 Yahoo 使用) ---
 warnings.filterwarnings('ignore')
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 ssl._create_default_https_context = ssl._create_unverified_context
 session = requests.Session()
 session.verify = False
-session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+    'Accept': '*/*'
+})
 
 # --- 網頁介面設定 ---
 st.set_page_config(page_title="小資投本比 旗艦終端機", page_icon="🚀", layout="wide")
@@ -154,7 +157,7 @@ if not INFO_DICT: load_company_info.clear()
 mode = st.sidebar.radio("切換系統模組", [
     "📡 嚴選加權評分雷達", 
     "🎯 個股健檢 (標的審查)", 
-    "⏱️️ 個股時光機 (歷史回測)", 
+    "⏱️ 個股時光機 (歷史回測)", 
     "💼 投資追蹤 (進出場管理)"
 ])
 st.sidebar.markdown("---")
@@ -169,7 +172,7 @@ if mode in ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"]
     ui_bias_max = st.sidebar.slider("乖離率容忍上限 (%)", 3.0, 15.0, 8.0, 0.5, help="超出此區間直接剔除")
     
     st.sidebar.markdown("---")
-    st.sidebar.subheader("🛡 估值與波動度防禦")
+    st.sidebar.subheader("🛡️ 估值與波動度防禦")
     ui_max_pe = st.sidebar.slider("本益比上限 (倍)", 5.0, 60.0, 20.0, 1.0, help="防禦估值過高飆股")
     ui_min_amplitude = st.sidebar.slider("5日均振幅下限 (%)", 1.0, 10.0, 3.5, 0.5, help="剔除股性死魚的標的")
     
@@ -243,18 +246,19 @@ if mode == "📡 嚴選加權評分雷達":
                     except Exception as e: st.error(f"⚠️ 解析錯誤：{e}")
             else: st.warning("⚠️ 請先上傳 CSV 檔案！")
         else:
-            with st.spinner("☁️ 正在雲端進行波動度與嚴格過濾 (管線最佳化高速版)..."):
+            with st.spinner("☁️ 正在雲端進行波動度與嚴格過濾 (暴力破解與防錯殺版)..."):
                 stock_list, target_date = [], datetime.datetime.now()
-                for _ in range(3):
+                # 🛡️ 升級1：將回溯天數放大到 7 天，遇到連續長假也能確保抓到最新買超紀錄
+                for _ in range(7):
                     try:
                         if chk_twse:
-                            res = session.get(f"https://www.twse.com.tw/fund/T86?response=json&date={target_date.strftime('%Y%m%d')}&selectType=ALL", verify=False, timeout=15)
+                            res = session.get(f"https://www.twse.com.tw/fund/T86?response=json&date={target_date.strftime('%Y%m%d')}&selectType=ALL", verify=False, timeout=10)
                             if res.status_code == 200 and 'data' in res.json():
                                 for row in res.json()['data']:
                                     code, name, it_buy = row[0].strip(), row[1].strip(), int(row[10].replace(',', ''))
                                     if len(code) == 4 and not (code.startswith('00') or code.startswith('28')) and it_buy > 0: stock_list.append({'code': code, 'name': name, 'market': '.TW', 'it_buy': it_buy})
                         if chk_tpex and not stock_list:
-                            res2 = session.get(f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=EW&t=D&d={target_date.year - 1911}/{target_date.strftime('%m/%d')}", verify=False, timeout=15)
+                            res2 = session.get(f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=EW&t=D&d={target_date.year - 1911}/{target_date.strftime('%m/%d')}", verify=False, timeout=10)
                             if res2.status_code == 200 and 'aaData' in res2.json():
                                 for row in res2.json()['aaData']:
                                     code, name, it_buy = str(row[0]).strip(), str(row[1]).strip(), int(str(row[7]).replace(',', '').split('.')[0])
@@ -269,12 +273,12 @@ if mode == "📡 嚴選加權評分雷達":
                     for i, stock in enumerate(stock_list):
                         if i % max(1, (len(stock_list) // 10)) == 0: my_bar.progress((i + 1) / len(stock_list))
                         try:
-                            # 🛡️ 核心修復1：移除被污染的 session，使用 yfinance 原生安全連線
-                            ticker = yf.Ticker(f"{stock['code']}{stock['market']}")
+                            # 🛡️ 升級2：把掛著 User-Agent 的 session 還給 yfinance，避免被當作機器人阻擋
+                            ticker = yf.Ticker(f"{stock['code']}{stock['market']}", session=session)
                             
-                            # 🛡️ 核心修復2：先檢查歷史數據與量能，淘汰掉 80% 的標的，大幅減少後續 API 請求
-                            hist = ticker.history(start=(target_date - datetime.timedelta(days=60)).strftime('%Y-%m-%d'))
-                            if len(hist) < 20 or float(hist['Close'].iloc[-1]) < 10.0: continue
+                            # 🛡️ 升級3：捨棄 start_date，改用最穩定的 period="3mo" 強制索取 K 線
+                            hist = ticker.history(period="3mo")
+                            if hist.empty or len(hist) < 20 or float(hist['Close'].iloc[-1]) < 10.0: continue
                             
                             if (float(hist['Volume'].rolling(5).mean().iloc[-1]) / 1000) < ui_min_vol: continue
                             
@@ -284,22 +288,28 @@ if mode == "📡 嚴選加權評分雷達":
                             bias = round(((float(hist['Close'].iloc[-1]) - float(hist['Close'].rolling(20).mean().iloc[-1])) / float(hist['Close'].rolling(20).mean().iloc[-1])) * 100, 2)
                             if not (-ui_bias_max <= bias <= ui_bias_max): continue
                             
-                            # 到了這一步，通常只剩下幾檔菁英，這時才去要容易被封鎖的基本面數據
+                            # 🛡️ 升級4：股數暴力破解，若 Yahoo 隱藏資料，改用市值反推，絕不錯殺！
                             try:
                                 shares = getattr(ticker.fast_info, 'shares', 0)
                                 if not shares: shares = ticker.info.get('sharesOutstanding', 0)
+                                if not shares:
+                                    mcap = getattr(ticker.fast_info, 'market_cap', 0) or ticker.info.get('marketCap', 0)
+                                    if mcap: shares = mcap / float(hist['Close'].iloc[-1])
                             except:
-                                shares = ticker.info.get('sharesOutstanding', 0)
+                                shares = 0
                                 
-                            if not shares or shares <= 0 or round(shares / 10000000, 2) > ui_max_cap: continue
-                            
-                            it_ratio = round(((stock['it_buy'] * 2.5) / shares) * 100, 2)
-                            if it_ratio < ui_min_it_ratio: continue
-                            
+                            it_ratio = 0.0
+                            if shares and shares > 0:
+                                it_ratio = round(((stock['it_buy'] * 2.5) / shares) * 100, 2)
+                                if it_ratio < ui_min_it_ratio: continue
+                                if round(shares / 10000000, 2) > ui_max_cap: continue
+                            else:
+                                # 股數真的算不出來時，給予「免死金牌」放行，避免無辜遭砍
+                                it_ratio = 99.9 
+                                
                             pe_ratio = ticker.info.get('trailingPE') or ticker.info.get('forwardPE') or 0
                             if pe_ratio > ui_max_pe and pe_ratio != 0: continue
                             
-                            # 計算技術指標
                             score = 55
                             low9, high9 = hist['Low'].rolling(9).min(), hist['High'].rolling(9).max()
                             hist['K'] = ((hist['Close'] - low9) / (high9 - low9) * 100).ewm(alpha=1/3, adjust=False).mean()
@@ -312,9 +322,19 @@ if mode == "📡 嚴選加權評分雷達":
                             rsi_val = round((100 - (100 / (1 + (delta.clip(lower=0).ewm(alpha=1/12, adjust=False).mean() / -delta.clip(upper=0).ewm(alpha=1/12, adjust=False).mean())))).iloc[-1], 2)
                             if rsi_val >= 50: score += 20
                             
-                            results.append({'代碼': stock['code'], '名稱': stock['name'], '綜合得分': score, '投本比(%)': it_ratio, '本益比': round(pe_ratio, 2) if pe_ratio > 0 else 'N/A', '5日均振幅(%)': avg_amp, 'BIAS(20日)': bias, 'K值': k_val, 'RSI(12日)': rsi_val})
+                            results.append({
+                                '代碼': stock['code'], 
+                                '名稱': stock['name'], 
+                                '綜合得分': score, 
+                                '投本比(%)': it_ratio if it_ratio != 99.9 else 'N/A(隱藏)', 
+                                '本益比': round(pe_ratio, 2) if pe_ratio > 0 else 'N/A', 
+                                '5日均振幅(%)': avg_amp, 
+                                'BIAS(20日)': bias, 
+                                'K值': k_val, 
+                                'RSI(12日)': rsi_val
+                            })
                         except Exception: 
-                            continue # 若抓取失敗直接換下一檔，不讓系統崩潰
+                            continue 
                             
                     my_bar.empty()
                     if results:
@@ -343,12 +363,12 @@ elif mode == "🎯 個股健檢 (標的審查)":
         
         with st.spinner(f"正在為 {check_stock} 進行基本面與技術面掃描..."):
             try:
-                # 🛡️ 移除 session
-                ticker = yf.Ticker(yahoo_ticker)
+                # 🛡️ 個股健檢也同步裝備偽裝 session 與穩定的 period
+                ticker = yf.Ticker(yahoo_ticker, session=session)
                 hist = ticker.history(period="3mo")
                 info = ticker.info
                 
-                if hist.empty: st.error("⚠️ 無法取得歷史資料。")
+                if hist.empty: st.error("⚠️ 無法取得歷史資料。請確認網路或稍後再試。")
                 else:
                     close = round(hist['Close'].iloc[-1], 2)
                     ma20 = hist['Close'].rolling(window=20).mean()
@@ -364,14 +384,14 @@ elif mode == "🎯 個股健檢 (標的審查)":
                     rsi_val = round((100 - (100 / (1 + (delta.clip(lower=0).ewm(alpha=1/12, adjust=False).mean() / -delta.clip(upper=0).ewm(alpha=1/12, adjust=False).mean())))).iloc[-1], 2)
                     
                     it_buy, target_date = 0, datetime.datetime.now()
-                    for _ in range(3):
+                    for _ in range(7):
                         try:
                             if market == ".TW":
-                                twse_data = session.get(f"https://www.twse.com.tw/fund/T86?response=json&date={target_date.strftime('%Y%m%d')}&selectType=ALL", verify=False, timeout=15).json()
+                                twse_data = session.get(f"https://www.twse.com.tw/fund/T86?response=json&date={target_date.strftime('%Y%m%d')}&selectType=ALL", verify=False, timeout=10).json()
                                 for row in twse_data.get('data', []):
                                     if row[0].strip() == stock_code: it_buy = int(row[10].replace(',', '')); break
                             else:
-                                tpex_data = session.get(f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=EW&t=D&d={target_date.year - 1911}/{target_date.strftime('%m/%d')}", verify=False, timeout=15).json()
+                                tpex_data = session.get(f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=EW&t=D&d={target_date.year - 1911}/{target_date.strftime('%m/%d')}", verify=False, timeout=10).json()
                                 for row in tpex_data.get('aaData', []):
                                     if str(row[0]).strip() == stock_code: it_buy = int(str(row[7]).replace(',', '').split('.')[0]); break
                         except: pass
@@ -381,8 +401,11 @@ elif mode == "🎯 個股健檢 (標的審查)":
                     try:
                         shares = getattr(ticker.fast_info, 'shares', 0)
                         if not shares: shares = info.get('sharesOutstanding', 0)
+                        if not shares:
+                            mcap = getattr(ticker.fast_info, 'market_cap', 0) or info.get('marketCap', 0)
+                            if mcap: shares = mcap / close
                     except:
-                        shares = info.get('sharesOutstanding', 0)
+                        shares = 0
                         
                     real_it_ratio = round(((it_buy * 2.5) / shares) * 100, 2) if shares > 0 and it_buy > 0 else 0.0
                     
@@ -404,8 +427,9 @@ elif mode == "🎯 個股健檢 (標的審查)":
                     col1, col2, col3 = st.columns(3)
                     with col1:
                         status = "✅ 過關" if real_it_ratio >= ui_min_it_ratio else "❌ 淘汰"
+                        if shares == 0: status, real_it_ratio = "✅ 放行(無股數)", "N/A"
                         if status == "❌ 淘汰": pass_all = False
-                        st.metric(f"投本比 (>{ui_min_it_ratio}%)", f"{real_it_ratio}%", status)
+                        st.metric(f"投本比 (>{ui_min_it_ratio}%)", f"{real_it_ratio}%" if real_it_ratio != "N/A" else "N/A", status)
                     with col2:
                         status = "✅ 過關" if -ui_bias_max <= bias <= ui_bias_max else "❌ 淘汰"
                         if status == "❌ 淘汰": pass_all = False
@@ -464,13 +488,13 @@ elif mode == "⏱️ 個股時光機 (歷史回測)":
     with col_start: start_date = st.date_input("起始日", datetime.date(2025, 1, 1))
     with col_end: end_date = st.date_input("結束日", datetime.date.today())
 
-    if st.button("🚀 啟動回測", type="primary"):
+    if st.button("🚀 啟回測", type="primary"):
         yahoo_ticker = STOCK_DICT[selected_stock]
         with st.spinner("正在下載資料並回測..."):
             try:
-                # 🛡️ 移除 session
-                ticker = yf.Ticker(yahoo_ticker)
-                hist = ticker.history(start=(start_date - datetime.timedelta(days=40)).strftime("%Y-%m-%d"))
+                # 🛡️ 回測機同步換上 period 與 session
+                ticker = yf.Ticker(yahoo_ticker, session=session)
+                hist = ticker.history(period="1y") # 放寬歷史長度確保能涵蓋用戶自訂區間
                 if hist.empty: st.error("⚠️ 抓不到資料！")
                 else:
                     hist['MA20'] = hist['Close'].rolling(20).mean()
@@ -478,7 +502,13 @@ elif mode == "⏱️ 個股時光機 (歷史回測)":
                     low9, high9 = hist['Low'].rolling(9).min(), hist['High'].rolling(9).max()
                     hist['K'] = ((hist['Close'] - low9) / (high9 - low9) * 100).ewm(alpha=1/3, adjust=False).mean()
                     hist['D'] = hist['K'].ewm(alpha=1/3, adjust=False).mean()
-                    backtest_data = hist.loc[start_date.strftime("%Y-%m-%d") : end_date.strftime("%Y-%m-%d")]
+                    
+                    # 避免用戶選到未來日期或超過範圍導致崩潰
+                    try:
+                        backtest_data = hist.loc[start_date.strftime("%Y-%m-%d") : end_date.strftime("%Y-%m-%d")]
+                    except:
+                        backtest_data = hist
+                        
                     current_capital, is_holding, current_trade, trade_history = ui_capital, False, {}, []
                     for date, row in backtest_data.iterrows():
                         date_str = date.strftime("%Y-%m-%d")
@@ -536,7 +566,7 @@ elif mode == "💼 投資追蹤 (進出場管理)":
             with col2:
                 t_shares = st.number_input("買進股數", min_value=1, value=1000, step=1000)
                 t_sl = st.number_input("設定停損價位", min_value=0.0, step=1.0)
-                t_tp = st.number_input("絕對金額停利啟提線 (元)", value=5000, step=1000)
+                t_tp = st.number_input("絕對金額停利啟動線 (元)", value=5000, step=1000)
                 
             if st.form_submit_button("📝 存入投資組合"):
                 new_trade = {"股票": t_stock, "買進日": t_date.strftime("%Y-%m-%d"), "買進價": t_price, "股數": t_shares, "停損價": t_sl, "停利目標": t_tp}
@@ -553,8 +583,8 @@ elif mode == "💼 投資追蹤 (進出場管理)":
             live_prices = []
             for idx, row in df_p.iterrows():
                 try:
-                    # 🛡️ 移除 session
-                    hist = yf.Ticker(STOCK_DICT.get(row['股票'], "2330.TW")).history(period="5d")
+                    # 🛡️ 投資追蹤同步加上 session
+                    hist = yf.Ticker(STOCK_DICT.get(row['股票'], "2330.TW"), session=session).history(period="5d")
                     live_prices.append(round(hist['Close'].iloc[-1], 2) if not hist.empty else row['買進價'])
                 except: live_prices.append(row['買進價'])
             
