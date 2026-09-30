@@ -18,26 +18,49 @@ twse_session.headers.update({
     'Accept': 'application/json, text/javascript, */*; q=0.01',
 })
 
-st.set_page_config(page_title="小資投本比 - 專屬管理終端機", page_icon="👑", layout="wide")
+st.set_page_config(page_title="小資投本比 旗艦終端機", page_icon="👑", layout="wide")
 
-# --- 檔案持久化設定 ---
-PORTFOLIO_FILE = "portfolio_data.csv"
+# ==========================================
+# 🛡️ 檔案持久化與超級管理員設定
+# ==========================================
+SUPER_ADMIN = "w184813740@hotmail.com"
 AUTH_FILE = "auth_list.txt"
+PORTFOLIO_FILE = "portfolio_data.csv"
 
-if not os.path.exists(AUTH_FILE):
-    with open(AUTH_FILE, "w") as f:
-        f.write("w184813740@hotmail.com\n") # 預設寫入您的信箱
+def get_auth_list():
+    if not os.path.exists(AUTH_FILE):
+        with open(AUTH_FILE, "w") as f:
+            f.write(SUPER_ADMIN + "\n")
+    with open(AUTH_FILE, "r") as f:
+        return [line.strip().lower() for line in f.readlines() if line.strip()]
 
-if 'radar_data' not in st.session_state: st.session_state['radar_data'] = None
-if 'radar_msg' not in st.session_state: st.session_state['radar_msg'] = ""
-if 'chat_history' not in st.session_state:
-    st.session_state['chat_history'] = [{"role": "assistant", "content": "您好！我是您的專屬量化助理。"}]
-if 'portfolio' not in st.session_state: 
-    if os.path.exists(PORTFOLIO_FILE): st.session_state['portfolio'] = pd.read_csv(PORTFOLIO_FILE)
-    else: st.session_state['portfolio'] = pd.DataFrame(columns=["股票", "買進日", "買進價", "股數", "停損價", "停利目標"])
+if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
+if 'role' not in st.session_state: st.session_state['role'] = 'guest'
+if 'user_email' not in st.session_state: st.session_state['user_email'] = ''
 
-# --- 雙引擎與資料庫快取 ---
-def get_kline_data(code, market, days=120):
+# 登入閘門
+if not st.session_state['logged_in']:
+    st.title("🔒 小資投本比 - 量化終端機")
+    st.markdown("### ⚠️ 請驗證您的身份以解鎖系統權限")
+    login_email = st.text_input("請輸入您的 E-mail").strip().lower()
+    
+    if st.button("🔑 驗證並登入", type="primary"):
+        auth_list = get_auth_list()
+        if login_email in auth_list:
+            st.session_state['logged_in'] = True
+            st.session_state['user_email'] = login_email
+            # 判斷權限角色
+            st.session_state['role'] = 'admin' if login_email == SUPER_ADMIN else 'user'
+            st.success(f"✅ 登入成功！歡迎，您的權限級別為：{'超級管理員 👑' if st.session_state['role'] == 'admin' else '一般使用者 🚀'}")
+            st.rerun()
+        else:
+            st.error("❌ 查無授權。請聯絡系統管理員 (w184813740@hotmail.com) 為您開通。")
+    st.stop()
+
+# ==========================================
+# 🚀 雙引擎與資料庫快取 (強化容錯與補救)
+# ==========================================
+def get_kline_data(code, market, days=180):
     try:
         end_ts = int(datetime.datetime.now().timestamp())
         start_ts = int((datetime.datetime.now() - datetime.timedelta(days=days)).timestamp())
@@ -50,12 +73,12 @@ def get_kline_data(code, market, days=120):
                 if df['Volume'].mean() > 10000: df['Volume'] = df['Volume'] / 1000
                 df.set_index('Date', inplace=True)
                 df = df.dropna()
-                if not df.empty and len(df) >= 20: return df, "鉅亨網"
+                if not df.empty and len(df) >= 10: return df, "鉅亨網"
     except: pass
     try:
         symbol = f"{code}{market}"
-        df = yf.Ticker(symbol).history(period="6mo")
-        if not df.empty and len(df) >= 20: return df, "Yahoo"
+        df = yf.Ticker(symbol).history(period="1y")
+        if not df.empty and len(df) >= 10: return df, "Yahoo"
     except: pass
     return pd.DataFrame(), "無資料"
 
@@ -109,15 +132,25 @@ INFO_DICT = load_company_info()
 PE_DICT = load_pe_data()
 
 # ==========================================
-# 🚀 專屬終端機介面
+# 🚀 終端機介面 (依據角色動態顯示)
 # ==========================================
-st.title("👑 小資投本比 - 專屬管理終端機")
+st.title("🏆 小資投本比 - 雙引擎量化終端機")
+st.caption(f"目前登入身份：{st.session_state['user_email']} ({'👑 管理員' if st.session_state['role'] == 'admin' else '👤 授權使用者'})")
 
-mode = st.sidebar.radio("切換系統模組", ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)", "💼 投資追蹤 (進出場管理)", "🔐 授權管理中心"])
+# 根據角色決定能看到的模組
+if st.session_state['role'] == 'admin':
+    mode = st.sidebar.radio("切換系統模組", ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)", "💼 投資追蹤 (進出場管理)", "🔐 授權管理中心"])
+else:
+    mode = st.sidebar.radio("切換系統模組", ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"])
+    
+if st.sidebar.button("🚪 登出系統"):
+    st.session_state['logged_in'] = False
+    st.rerun()
+
 st.sidebar.markdown("---")
 
 if mode in ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"]:
-    st.sidebar.subheader("🎛️ 黃金實戰參數")
+    st.sidebar.subheader("🎛️️ 黃金實戰參數")
     ui_min_it_ratio = st.sidebar.slider("投本比絕對下限 (%)", 0.0, 2.0, 0.15, 0.01)
     ui_bias_max = st.sidebar.slider("乖離率容忍上限 (%)", 3.0, 20.0, 12.0, 0.5)
     
@@ -129,16 +162,18 @@ if mode in ["📡 嚴選加權評分雷達", "🎯 個股健檢 (標的審查)"]
     ui_min_vol = st.sidebar.slider("5日均量下限 (張)", 100, 5000, 800, 100)
     ui_max_cap = st.sidebar.slider("股本上限 (億)", 10, 500, 200, 10)
 
+# ==========================================
+# 模組 1：🔐 授權管理中心 (僅管理員可見)
+# ==========================================
 if mode == "🔐 授權管理中心":
     st.subheader("🔐 分享版使用者授權管理")
-    st.markdown("在此新增或刪除 E-mail，擁有權限的信箱才能登入您的分享版終端機。")
+    st.markdown("在此新增或刪除 E-mail。因雙方共用同一個 App，名單修改後，朋友立刻就能登入。")
     
-    with open(AUTH_FILE, "r") as f:
-        auth_list = [line.strip() for line in f.readlines() if line.strip()]
+    auth_list = get_auth_list()
         
     col1, col2 = st.columns(2)
     with col1:
-        new_email = st.text_input("輸入欲授權的 E-mail")
+        new_email = st.text_input("輸入欲授權的 E-mail").strip().lower()
         if st.button("➕ 新增授權", type="primary"):
             if new_email and new_email not in auth_list:
                 with open(AUTH_FILE, "a") as f: f.write(new_email + "\n")
@@ -151,17 +186,26 @@ if mode == "🔐 授權管理中心":
         for email in auth_list:
             cols = st.columns([4, 1])
             cols[0].write(f"✅ {email}")
-            if email != "w184813740@hotmail.com":
+            if email != SUPER_ADMIN:
                 if cols[1].button("刪除", key=email):
                     auth_list.remove(email)
                     with open(AUTH_FILE, "w") as f:
                         for e in auth_list: f.write(e + "\n")
                     st.rerun()
 
+# ==========================================
+# 模組 2：📡 嚴選加權評分雷達
+# ==========================================
 elif mode == "📡 嚴選加權評分雷達":
-    data_source = st.radio("選擇數據引擎", ["☁️ 雙引擎直連雲端抓取", "⚡ XQ 檔案上傳 (專屬功能)"], horizontal=True)
+    # 只有管理員可以選擇 XQ 上傳
+    if st.session_state['role'] == 'admin':
+        data_source = st.radio("選擇數據引擎", ["☁️ 雙引擎直連雲端抓取", "⚡ XQ 檔案上傳 (管理員專屬)"], horizontal=True)
+    else:
+        data_source = "☁️ 雙引擎直連雲端抓取"
+        st.markdown("☁️ **目前使用：雙引擎直連雲端抓取**")
+        
     uploaded_file = None
-    if data_source == "⚡ XQ 檔案上傳 (專屬功能)":
+    if data_source == "⚡ XQ 檔案上傳 (管理員專屬)":
         uploaded_file = st.file_uploader("📂 請上傳 XQ 匯出的 CSV 檔", type=['csv'])
     else:
         col1, col2 = st.columns(2)
@@ -169,7 +213,7 @@ elif mode == "📡 嚴選加權評分雷達":
         with col2: chk_tpex = st.checkbox("掃描上櫃股票", True)
     
     if st.button("🚀 啟動嚴選評分", type="primary"):
-        if data_source == "⚡ XQ 檔案上傳 (專屬功能)":
+        if data_source == "⚡ XQ 檔案上傳 (管理員專屬)":
             if uploaded_file is not None:
                 with st.spinner("⚡ 正在嚴格篩選並計算加權分數..."):
                     try:
@@ -244,24 +288,35 @@ elif mode == "📡 嚴選加權評分雷達":
                         code = stock['code']
                         try:
                             pe_ratio = PE_DICT.get(code, 0)
-                            if pe_ratio > ui_max_pe and pe_ratio != 0:
-                                debug_logs.append(f"{code} {stock['name']} ❌ 淘汰：本益比過高 ({pe_ratio} > {ui_max_pe})")
+                            shares = INFO_DICT.get(code, {}).get('shares', 0)
+                            
+                            # Yahoo 備援修復缺失的本益比與股本
+                            if shares == 0 or pe_ratio == 0:
+                                try:
+                                    tk = yf.Ticker(f"{code}{stock['market']}")
+                                    info = tk.info
+                                    if shares == 0 and info.get('sharesOutstanding'): shares = info.get('sharesOutstanding') / 10
+                                    if pe_ratio == 0 and info.get('trailingPE'): pe_ratio = info.get('trailingPE')
+                                except: pass
+                            
+                            if pe_ratio <= 0 or pe_ratio > ui_max_pe:
+                                debug_logs.append(f"{code} {stock['name']} ❌ 淘汰：本益比過高或無資料 ({round(pe_ratio,2)} > {ui_max_pe})")
                                 continue
                             
-                            shares = INFO_DICT.get(code, {}).get('shares', 0)
-                            it_ratio = 0.0
-                            if shares > 0:
-                                it_ratio = round(((stock['it_buy'] * 2.5) / shares) * 100, 2)
-                                if it_ratio < ui_min_it_ratio:
-                                    debug_logs.append(f"{code} {stock['name']} ❌ 淘汰：投本比未達標 ({it_ratio}%)")
-                                    continue
-                                if round(shares / 10000000, 2) > ui_max_cap:
-                                    debug_logs.append(f"{code} {stock['name']} ❌ 淘汰：股本過大")
-                                    continue
-                            else:
-                                it_ratio = 99.9
+                            if shares <= 0:
+                                debug_logs.append(f"{code} {stock['name']} ❌ 淘汰：無股本資料可算投本比")
+                                continue
                                 
-                            stock_df, source_name = get_kline_data(code, stock['market'], days=90)
+                            it_ratio = round(((stock['it_buy'] * 2.5) / shares) * 100, 2)
+                            if it_ratio < ui_min_it_ratio:
+                                debug_logs.append(f"{code} {stock['name']} ❌ 淘汰：投本比未達標 ({it_ratio}%)")
+                                continue
+                                
+                            if round(shares / 10000000, 2) > ui_max_cap:
+                                debug_logs.append(f"{code} {stock['name']} ❌ 淘汰：股本過大")
+                                continue
+                                
+                            stock_df, source_name = get_kline_data(code, stock['market'], days=180)
                             if stock_df.empty:
                                 debug_logs.append(f"{code} {stock['name']} ❌ 淘汰：雙引擎皆無K線")
                                 continue
@@ -297,8 +352,7 @@ elif mode == "📡 嚴選加權評分雷達":
                             
                             results.append({
                                 '代碼': stock['code'], '名稱': stock['name'], '綜合得分': score, 
-                                '投本比(%)': it_ratio if it_ratio != 99.9 else 'N/A', 
-                                '本益比': round(pe_ratio, 2) if pe_ratio > 0 else 'N/A', 
+                                '投本比(%)': it_ratio, '本益比': round(pe_ratio, 2), 
                                 '5日均振幅(%)': avg_amp, 'BIAS(20日)': bias, 'K值': k_val, '引擎': source_name
                             })
                             debug_logs.append(f"{code} {stock['name']} ✅ 成功過關存活！({source_name})")
@@ -317,12 +371,14 @@ elif mode == "📡 嚴選加權評分雷達":
             st.success(st.session_state['radar_msg'])
             st.dataframe(st.session_state['radar_data'], use_container_width=True, hide_index=True)
         else: st.warning(st.session_state['radar_msg'])
-        if 'debug_logs' in st.session_state and st.session_state['debug_logs']:
+        
+        # 開發者透視眼僅管理員可見，避免朋友看到太多複雜資訊
+        if st.session_state['role'] == 'admin' and 'debug_logs' in st.session_state and st.session_state['debug_logs']:
             with st.expander("🛠️ 開發者透視眼 (點擊查看：每檔股票為何被淘汰？)"):
                 for log in st.session_state['debug_logs']: st.write(log)
 
 # ==========================================
-# 模組 2：個股健檢 (標的審查)
+# 模組 3：🎯 個股健檢 (標的審查)
 # ==========================================
 elif mode == "🎯 個股健檢 (標的審查)":
     st.subheader("🎯 個股 X 光機 - 雙引擎基本面掃描")
@@ -331,7 +387,7 @@ elif mode == "🎯 個股健檢 (標的審查)":
         stock_code, market = check_stock.split(" ")[0], ".TW" if "(上市)" in check_stock else ".TWO"
         with st.spinner(f"正在掃描 {check_stock} ..."):
             try:
-                hist, source_name = get_kline_data(stock_code, market, days=90)
+                hist, source_name = get_kline_data(stock_code, market, days=180)
                 if hist.empty: st.error("⚠️ 雙引擎皆無法取得歷史資料。")
                 else:
                     close = round(float(hist['Close'].iloc[-1]), 2)
@@ -361,31 +417,47 @@ elif mode == "🎯 個股健檢 (標的審查)":
                         target_date -= datetime.timedelta(days=1)
                         
                     shares = INFO_DICT.get(stock_code, {}).get('shares', 0)
-                    real_it_ratio = round(((it_buy * 2.5) / shares) * 100, 2) if shares > 0 and it_buy > 0 else 0.0
+                    
+                    # 啟動備援修復
+                    if shares == 0 or pe_ratio == 0:
+                        try:
+                            tk = yf.Ticker(f"{stock_code}{market}")
+                            info = tk.info
+                            if shares == 0 and info.get('sharesOutstanding'): shares = info.get('sharesOutstanding') / 10
+                            if pe_ratio == 0 and info.get('trailingPE'): pe_ratio = info.get('trailingPE')
+                        except: pass
                     
                     st.markdown(f"### 📊 【{check_stock}】 目前現價: {close} 元 (資料源: {source_name})")
                     pass_all = True
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        status = "✅ 過關" if real_it_ratio >= ui_min_it_ratio else "❌ 淘汰"
-                        if shares == 0: status, real_it_ratio = "✅ 放行(無股數)", "N/A"
-                        if status == "❌ 淘汰": pass_all = False
-                        st.metric(f"投本比 (>{ui_min_it_ratio}%)", f"{real_it_ratio}%" if real_it_ratio != "N/A" else "N/A", status)
+                        if shares > 0:
+                            real_it_ratio = round(((it_buy * 2.5) / shares) * 100, 2)
+                            status_it = "✅ 過關" if real_it_ratio >= ui_min_it_ratio else "❌ 淘汰"
+                        else:
+                            real_it_ratio, status_it = "N/A", "❌ 淘汰(缺股數)"
+                        if "淘汰" in status_it: pass_all = False
+                        st.metric(f"投本比 (>{ui_min_it_ratio}%)", f"{real_it_ratio}%" if real_it_ratio != "N/A" else "N/A", status_it)
+                        
                     with col2:
-                        status = "✅ 過關" if -ui_bias_max <= bias <= ui_bias_max else "❌ 淘汰"
-                        if status == "❌ 淘汰": pass_all = False
-                        st.metric(f"BIAS (±{ui_bias_max}%)", f"{bias}%", status)
+                        status_bias = "✅ 過關" if -ui_bias_max <= bias <= ui_bias_max else "❌ 淘汰"
+                        if status_bias == "❌ 淘汰": pass_all = False
+                        st.metric(f"BIAS (±{ui_bias_max}%)", f"{bias}%", status_bias)
+                        
                     with col3:
-                        status = "✅ 過關" if (0 < pe_ratio <= ui_max_pe) or pe_ratio == 0 else "❌ 淘汰"
-                        if status == "❌ 淘汰": pass_all = False
-                        st.metric(f"本益比 (<{ui_max_pe})", f"{round(pe_ratio, 2)} 倍" if pe_ratio > 0 else "無/虧損", status)
+                        if pe_ratio > 0:
+                            status_pe = "✅ 過關" if pe_ratio <= ui_max_pe else "❌ 淘汰"
+                        else:
+                            status_pe = "❌ 淘汰(虧損或無資料)"
+                        if "淘汰" in status_pe: pass_all = False
+                        st.metric(f"本益比 (<{ui_max_pe})", f"{round(pe_ratio, 2)} 倍" if pe_ratio > 0 else "無/虧損", status_pe)
                         
                     st.markdown("---")
                     col4, col5, col6 = st.columns(3)
                     with col4:
-                        status = "✅ 過關" if avg_amp >= ui_min_amplitude else "❌ 淘汰(太牛皮)"
-                        if status == "❌ 淘汰(太牛皮)": pass_all = False
-                        st.metric(f"5日均振幅 (>{ui_min_amplitude}%)", f"{avg_amp}%", status)
+                        status_amp = "✅ 過關" if avg_amp >= ui_min_amplitude else "❌ 淘汰(太牛皮)"
+                        if status_amp == "❌ 淘汰(太牛皮)": pass_all = False
+                        st.metric(f"5日均振幅 (>{ui_min_amplitude}%)", f"{avg_amp}%", status_amp)
                     with col5:
                         st.metric("KD 狀態", f"K:{k_val}", "🔥 加分" if k_val > d_val else "➖ 未加分")
                     with col6:
@@ -395,13 +467,17 @@ elif mode == "🎯 個股健檢 (標的審查)":
                     if pass_all: 
                         score = 55 + (25 if k_val > d_val and k_val <= 80 else 15 if k_val > d_val else 0) + (20 if rsi_val >= 50 else 0)
                         st.success(f"🎉 **診斷結果：強勢存活！** 綜合得分為 **{score} 分**！")
-                    else: st.error("⚠️ **診斷結果：淘汰。**")
+                    else: st.error("⚠️ **診斷結果：淘汰。** 核心指標未達標準。")
             except Exception as e: st.error(f"健檢發生錯誤: {e}")
 
 # ==========================================
-# 模組 3：投資追蹤 (進出場管理)
+# 模組 4：💼 投資追蹤 (進出場管理) - 僅管理員可見
 # ==========================================
-elif mode == "💼 投資追蹤 (進出場管理)":
+elif mode == "💼 投資追蹤 (進出場管理)" and st.session_state['role'] == 'admin':
+    if 'portfolio' not in st.session_state: 
+        if os.path.exists(PORTFOLIO_FILE): st.session_state['portfolio'] = pd.read_csv(PORTFOLIO_FILE)
+        else: st.session_state['portfolio'] = pd.DataFrame(columns=["股票", "買進日", "買進價", "股數", "停損價", "停利目標"])
+        
     st.subheader("💼 我的量化投資組合")
     with st.expander("➕ 新增交易紀錄", expanded=False):
         with st.form("add_trade_form"):
@@ -439,7 +515,7 @@ elif mode == "💼 投資追蹤 (進出場管理)":
             status_list = []
             for _, row in df_p.iterrows():
                 if row['最新現價'] <= row['停損價']: status_list.append("🔴 破停損，請平倉")
-                elif row['未實現損益(元)'] >= row['停利目標']: status_list.append("🟢 達標，啟動移動鎖利")
+                elif row['未實現損益(元)'] >= row['停利目標']: status_list.append("🟢 達標，移動鎖利")
                 else: status_list.append("⏳ 紀律持股中")
             df_p['目前狀態'] = status_list
             
